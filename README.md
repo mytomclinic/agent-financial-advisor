@@ -73,7 +73,7 @@ Real USDC: `npx wrangler secret put CDP_API_KEY_JSON < secrets/cdp_api_key.json`
 Speaks x402 v2: a 402 carries a base64 `PAYMENT-REQUIRED` header (CAIP-2 network, e.g. `eip155:8453`), clients pay with
 `PAYMENT-SIGNATURE`, and the settlement comes back in `PAYMENT-RESPONSE`. v1 clients (`X-PAYMENT`, body `accepts`) still work.
 
-End-to-end test on the test network: `npm i --no-save viem && node scripts/test-payment.mjs <server url> --fund`.
+End-to-end test on the test network: `npm i --no-save viem && node scripts/e2e-payment.mjs <server url> --fund`.
 
 ## Layout
 

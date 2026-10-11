@@ -3,7 +3,7 @@
 // test wallet. Test network only unless --allow-mainnet is passed.
 //
 //   npm i --no-save viem
-//   node scripts/test-payment.mjs https://<your-worker>.workers.dev [--fund]
+//   node scripts/e2e-payment.mjs https://<your-worker>.workers.dev [--fund]
 //
 // --fund asks the CDP faucet for test USDC (needs secrets/cdp_api_key.json).
 // The throwaway wallet key is created in secrets/test_wallet.json (gitignored) and never printed.
@@ -13,7 +13,7 @@ import { cdpJwt, parseCdpKey } from "../src/billing/cdpAuth.js";
 
 const args = process.argv.slice(2);
 const base = (args.find((a) => a.startsWith("http")) || process.env.AFA_URL || "").replace(/\/+$/, "");
-if (!base) throw new Error("Usage: node scripts/test-payment.mjs <server url> [--fund] [--allow-mainnet]");
+if (!base) throw new Error("Usage: node scripts/e2e-payment.mjs <server url> [--fund] [--allow-mainnet]");
 const { privateKeyToAccount, generatePrivateKey } = await import("viem/accounts");
 const { createPublicClient, http, parseAbi } = await import("viem");
 const { base: baseMain, baseSepolia } = await import("viem/chains");
