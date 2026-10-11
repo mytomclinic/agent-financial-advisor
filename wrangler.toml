@@ -1,0 +1,16 @@
+name = "agent-financial-advisor"
+main = "src/worker.js"
+compatibility_date = "2026-09-01"
+compatibility_flags = ["nodejs_compat"]
+
+# Create with: npx wrangler kv namespace create AFA_KV  (free), then paste the id here.
+[[kv_namespaces]]
+binding = "AFA_KV"
+id = "5b8c6d6b23614fb29180526e2457b437"
+
+[vars]
+X402_NETWORK = "base-sepolia"   # switch to "base" for real money once tested
+FREE_DAILY_CALLS = "25"
+FREE_DAILY_ANON = "5"
+PAY_TO = "0x2475af09a9d4A50f7941209ee0e7b1EfA2FF73e5"  # Zach's Coinbase USDC address (Base); checksum verified 2026-10-11
+# Secrets (set with `npx wrangler secret put NAME`): ADMIN_TOKEN, FACILITATOR_AUTH

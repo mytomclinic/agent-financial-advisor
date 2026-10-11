@@ -1,0 +1,7 @@
+node_modules/
+data/
+secrets/
+.secrets/
+.wrangler/
+.dev.vars
+docs/
