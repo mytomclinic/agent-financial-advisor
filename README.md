@@ -19,7 +19,7 @@ Agents call it before they act; it answers with sourced, deterministic checks an
 ## Run locally (Node 20+, no dependencies)
 
 ```
-npm test          # 17 tests
+npm test          # 21 tests
 npm start         # http://localhost:8787  (payments off until PAY_TO is set)
 ```
 
@@ -53,8 +53,10 @@ MCP clients: point a streamable-HTTP MCP connection at `http://localhost:8787/mc
 |---|---|---|
 | `PAY_TO` | unset | USDC receiving address. Unset = free preview, no payments |
 | `X402_NETWORK` | `base-sepolia` | `base` for real money |
-| `FACILITATOR_URL` | `https://x402.org/facilitator` | CDP facilitator for mainnet |
-| `FACILITATOR_AUTH` | unset | Authorization header for the facilitator |
+| `CDP_API_KEY_JSON` | unset | Secret: the downloaded CDP key file. When set, payments go through the Coinbase CDP facilitator (needed for mainnet). `CDP_API_KEY_ID` + `CDP_API_KEY_SECRET` also work |
+| `FACILITATOR_URL` | CDP if a key is set, else `https://x402.org/facilitator` | Override the facilitator |
+| `FACILITATOR_AUTH` | unset | Static Authorization header for a non-CDP facilitator |
+| `X402_MIN_USD` | `0.01` | Minimum pay-per-call x402 price (credits pay list price) |
 | `FREE_DAILY_CALLS` / `FREE_DAILY_ANON` | 25 / 5 | Free tier |
 | `ADMIN_TOKEN` | unset | For `/admin/revenue` |
 | `DATA_DIR` | `./data` | Node store and ledger |
@@ -63,6 +65,15 @@ MCP clients: point a streamable-HTTP MCP connection at `http://localhost:8787/mc
 ## Deploy (free)
 
 Cloudflare Workers: `npx wrangler kv namespace create AFA_KV`, put the id in `wrangler.toml`, then `npx wrangler deploy`.
+
+Real USDC: `npx wrangler secret put CDP_API_KEY_JSON < secrets/cdp_api_key.json`, set `X402_NETWORK = "base"` in `wrangler.toml`, deploy.
+
+## Payments (x402)
+
+Speaks x402 v2: a 402 carries a base64 `PAYMENT-REQUIRED` header (CAIP-2 network, e.g. `eip155:8453`), clients pay with
+`PAYMENT-SIGNATURE`, and the settlement comes back in `PAYMENT-RESPONSE`. v1 clients (`X-PAYMENT`, body `accepts`) still work.
+
+End-to-end test on the test network: `npm i --no-save viem && node scripts/e2e-payment.mjs <server url> --fund`.
 
 ## Layout
 

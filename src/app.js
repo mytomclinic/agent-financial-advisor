@@ -12,12 +12,15 @@ export const SERVICE = {
 };
 
 const json = (body, status = 200, headers = {}) =>
-  new Response(JSON.stringify(body, null, 2), { status, headers: { "content-type": "application/json", "access-control-allow-origin": "*", ...headers } });
+  new Response(JSON.stringify(body, null, 2), { status, headers: { "content-type": "application/json", "access-control-allow-origin": "*", "access-control-expose-headers": "payment-required, payment-response, x-payment-response", ...headers } });
 
 function bearer(req) {
   const h = req.headers.get("authorization") || "";
   return h.toLowerCase().startsWith("bearer ") ? h.slice(7).trim() : req.headers.get("x-api-key");
 }
+
+// x402 v2 clients send PAYMENT-SIGNATURE; v1 clients send X-PAYMENT.
+const paymentHeader = (req) => req.headers.get("payment-signature") || req.headers.get("x-payment");
 
 const clientIp = (req) => req.headers.get("cf-connecting-ip") || (req.headers.get("x-forwarded-for") || "").split(",")[0].trim() || "local";
 
@@ -40,7 +43,7 @@ function overview(base) {
     `- REST: POST ${base}/v1/tools/{name} with a JSON body. Schemas: GET ${base}/v1/tools, OpenAPI: ${base}/openapi.json`,
     `- MCP (streamable HTTP): ${base}/mcp`,
     "- Free trial: a few calls a day without a key. Free API key (POST /v1/keys) adds 25 free calls a day.",
-    "- Pay per call with x402 (USDC on Base) via the X-PAYMENT header, or prepay credits: POST /v1/credits?pack=5|20|100 (packs of $20 and $100 include 10% and 20% bonus credit).",
+    "- Pay per call with x402 (USDC on Base; minimum $0.01 per call), or prepay credits at list price: POST /v1/credits?pack=5|20|100 (packs of $20 and $100 include 10% and 20% bonus credit).",
     "",
     "Outputs are automated analysis for software agents, not personalized investment, tax or legal advice.",
   ];
@@ -74,15 +77,16 @@ async function runTool(tool, args, ctx, req, base) {
   const auth = await ctx.billing.authorize({
     usd: tool.price_usd,
     apiKey: bearer(req),
-    paymentHeader: req.headers.get("x-payment"),
+    paymentHeader: paymentHeader(req),
     ip: clientIp(req),
     resource: `${base}/v1/tools/${tool.name}`,
     description: tool.title,
   });
-  if (!auth.allowed) return { status: auth.status, body: auth.body };
+  if (!auth.allowed) return { status: auth.status, body: auth.body, headers: auth.headers };
   const fin = await auth.finalize();
-  const headers = fin.paymentResponse ? { "x-payment-response": fin.paymentResponse } : {};
-  const billing = { mode: auth.mode, price_usd: tool.price_usd, ...(fin.credits_left_usd != null ? { credits_left_usd: fin.credits_left_usd } : {}), ...(fin.hint ? { hint: fin.hint } : {}) };
+  const headers = fin.paymentResponse ? { [fin.paymentResponseHeader]: fin.paymentResponse } : {};
+  const charged = auth.mode === "x402" ? ctx.billing.x402Price(tool.price_usd) : tool.price_usd;
+  const billing = { mode: auth.mode, price_usd: charged, ...(fin.credits_left_usd != null ? { credits_left_usd: fin.credits_left_usd } : {}), ...(fin.hint ? { hint: fin.hint } : {}) };
   await ctx.store.append("usage", { ts: new Date().toISOString(), tool: tool.name, mode: auth.mode });
   return { status: 200, body: { ...result, _billing: billing }, headers };
 }
@@ -131,15 +135,15 @@ export async function handle(req, ctx) {
   const base = ctx.publicUrl || `${url.protocol}//${url.host}`;
   const path = url.pathname.replace(/\/+$/, "") || "/";
 
-  if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: { "access-control-allow-origin": "*", "access-control-allow-headers": "*", "access-control-allow-methods": "GET,POST,OPTIONS", "access-control-expose-headers": "x-payment-response" } });
+  if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: { "access-control-allow-origin": "*", "access-control-allow-headers": "*", "access-control-allow-methods": "GET,POST,OPTIONS", "access-control-expose-headers": "payment-required, payment-response, x-payment-response" } });
 
   try {
     if (req.method === "GET" && (path === "/" || path === "/llms.txt")) return new Response(overview(base), { headers: { "content-type": "text/markdown; charset=utf-8" } });
-    if (req.method === "GET" && path === "/health") return json({ ok: true, version: SERVICE.version, rules_version: RULES_VERSION, payments_enabled: Boolean(ctx.billing.cfg.payTo), network: ctx.billing.cfg.network });
+    if (req.method === "GET" && path === "/health") return json({ ok: true, version: SERVICE.version, rules_version: RULES_VERSION, payments_enabled: Boolean(ctx.billing.cfg.payTo), network: ctx.billing.cfg.network, facilitator: new URL(ctx.billing.cfg.facilitatorUrl).host, facilitator_auth: Boolean(ctx.billing.cfg.cdpKey || ctx.billing.cfg.facilitatorAuth) });
     if (req.method === "GET" && path === "/v1/tools") return json({ service: SERVICE, tools: TOOLS.map((t) => toolCard(t, base)) });
-    if (req.method === "GET" && path === "/pricing") return json({ currency: "USD", per_call: Object.fromEntries(TOOLS.map((t) => [t.name, t.price_usd])), free_calls_per_day_with_key: ctx.billing.cfg.freeDailyPerKey, anonymous_trial_calls_per_day: ctx.billing.cfg.freeDailyAnon, credit_packs: CREDIT_PACKS, payment: { protocol: "x402", asset: "USDC", network: ctx.billing.cfg.network } });
+    if (req.method === "GET" && path === "/pricing") return json({ currency: "USD", per_call: Object.fromEntries(TOOLS.map((t) => [t.name, t.price_usd])), free_calls_per_day_with_key: ctx.billing.cfg.freeDailyPerKey, anonymous_trial_calls_per_day: ctx.billing.cfg.freeDailyAnon, credit_packs: CREDIT_PACKS, payment: { protocol: "x402", versions: [2, 1], asset: "USDC", network: ctx.billing.cfg.network, caip2: ctx.billing.cfg.caip2, min_per_call_usd: ctx.billing.cfg.minX402Usd } });
     if (req.method === "GET" && path === "/openapi.json") return json(openapi(base));
-    if (req.method === "GET" && path === "/.well-known/x402") return json({ x402Version: 1, resources: TOOLS.filter((t) => t.price_usd).map((t) => ({ resource: `${base}/v1/tools/${t.name}`, price_usd: t.price_usd, description: t.description })) });
+    if (req.method === "GET" && path === "/.well-known/x402") return json({ x402Version: 2, network: ctx.billing.cfg.caip2, payTo: ctx.billing.cfg.payTo, resources: TOOLS.filter((t) => t.price_usd).map((t) => ({ resource: `${base}/v1/tools/${t.name}`, method: "POST", price_usd: ctx.billing.x402Price(t.price_usd), list_price_usd: t.price_usd, description: t.description })) });
 
     if (path === "/mcp") {
       if (req.method === "POST") return handleMcp(req, ctx, base);
@@ -162,14 +166,17 @@ export async function handle(req, ctx) {
       if (!pack) return json({ error: "pack must be 5, 20 or 100" }, 400);
       if (!k || !(await ctx.billing.keyInfo(k))) return json({ error: "Credits attach to an API key: send Authorization: Bearer <key> (get one free at POST /v1/keys)." }, 401);
       const resource = `${base}/v1/credits?pack=${pack.price_usd}`;
-      const pay = req.headers.get("x-payment");
-      if (!pay) return json(ctx.billing.paymentRequired(pack.price_usd, resource, `${pack.credits_usd} USD of advisory credits`, "Payment required for credit pack.").body, 402);
+      const pay = paymentHeader(req);
+      if (!pay) {
+        const pr = ctx.billing.paymentRequired(pack.price_usd, resource, `${pack.credits_usd} USD of advisory credits`, "Payment required for credit pack.");
+        return json(pr.body, 402, pr.headers);
+      }
       const auth = await ctx.billing.authorizeX402({ usd: pack.price_usd, paymentHeader: pay, resource, description: `${pack.credits_usd} USD of advisory credits` });
-      if (!auth.allowed) return json(auth.body, auth.status);
+      if (!auth.allowed) return json(auth.body, auth.status, auth.headers || {});
       const fin = await auth.finalize();
       if (!fin.settled) return json({ error: "Payment could not be settled; no charge was made." }, 402);
       const balance = await ctx.billing.addCredits(k, pack.credits_usd);
-      return json({ credits_added_usd: pack.credits_usd, credits_usd: balance }, 200, { "x-payment-response": fin.paymentResponse });
+      return json({ credits_added_usd: pack.credits_usd, credits_usd: balance }, 200, { [fin.paymentResponseHeader]: fin.paymentResponse });
     }
 
     const m = path.match(/^\/v1\/tools\/([a-z_]+)$/);
