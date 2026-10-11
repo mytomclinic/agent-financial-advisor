@@ -1,11 +1,15 @@
 // Billing: free tier, prepaid credits on API keys, and pay-per-call with x402
 // (HTTP 402 + USDC). See https://x402.org for the protocol.
+// Speaks x402 v2 (PAYMENT-REQUIRED / PAYMENT-SIGNATURE / PAYMENT-RESPONSE headers,
+// CAIP-2 network ids) and still accepts v1 X-PAYMENT clients.
 import { createHash, randomBytes } from "node:crypto";
+import { cdpJwt, parseCdpKey } from "./cdpAuth.js";
 
-const USDC = {
-  base: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
-  "base-sepolia": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+const NETWORKS = {
+  base: { caip2: "eip155:8453", usdc: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", tokenName: "USD Coin" },
+  "base-sepolia": { caip2: "eip155:84532", usdc: "0x036CbD53842c5426634e7929541eC2318f3dCF7e", tokenName: "USDC" },
 };
+const CDP_FACILITATOR = "https://api.cdp.coinbase.com/platform/v2/x402";
 
 export const CREDIT_PACKS = {
   5: { price_usd: 5, credits_usd: 5 },
@@ -15,12 +19,19 @@ export const CREDIT_PACKS = {
 
 export function billingConfig(env = {}) {
   const network = env.X402_NETWORK || "base-sepolia";
+  const cdpKey = parseCdpKey({ json: env.CDP_API_KEY_JSON, id: env.CDP_API_KEY_ID, secret: env.CDP_API_KEY_SECRET });
   return {
     payTo: env.PAY_TO || null,
     network,
-    asset: env.X402_ASSET || USDC[network],
-    facilitatorUrl: env.FACILITATOR_URL || "https://x402.org/facilitator",
+    caip2: NETWORKS[network]?.caip2 || network,
+    asset: env.X402_ASSET || NETWORKS[network]?.usdc,
+    tokenName: NETWORKS[network]?.tokenName || "USDC",
+    facilitatorUrl: env.FACILITATOR_URL || (cdpKey ? CDP_FACILITATOR : "https://x402.org/facilitator"),
     facilitatorAuth: env.FACILITATOR_AUTH || null,
+    cdpKey,
+    // Floor on pay-per-call x402 prices so per-settlement fees can't eat a sub-cent call.
+    // API-key credits are charged the plain list price.
+    minX402Usd: Number(env.X402_MIN_USD ?? 0.01),
     freeDailyPerKey: Number(env.FREE_DAILY_CALLS || 25),
     freeDailyAnon: Number(env.FREE_DAILY_ANON || 5),
     maxKeysPerIpPerDay: Number(env.MAX_KEYS_PER_IP || 3),
@@ -31,6 +42,9 @@ const hashKey = (k) => createHash("sha256").update(k).digest("hex");
 const today = () => new Date().toISOString().slice(0, 10);
 export const atomic = (usd) => String(Math.round(usd * 1e6));
 
+export const x402Price = (cfg, usd) => Math.max(usd, cfg.minX402Usd || 0);
+
+// v1 requirements (legacy network names, maxAmountRequired).
 export function paymentRequirements(cfg, { usd, resource, description }) {
   return {
     scheme: "exact",
@@ -42,9 +56,24 @@ export function paymentRequirements(cfg, { usd, resource, description }) {
     payTo: cfg.payTo,
     maxTimeoutSeconds: 120,
     asset: cfg.asset,
-    extra: { name: cfg.network === "base" ? "USD Coin" : "USDC", version: "2" },
+    extra: { name: cfg.tokenName, version: "2" },
   };
 }
+
+// v2 requirements (CAIP-2 network, amount).
+export function paymentRequirementsV2(cfg, { usd }) {
+  return {
+    scheme: "exact",
+    network: cfg.caip2,
+    amount: atomic(usd),
+    asset: cfg.asset,
+    payTo: cfg.payTo,
+    maxTimeoutSeconds: 120,
+    extra: { name: cfg.tokenName, version: "2" },
+  };
+}
+
+const b64json = (o) => Buffer.from(JSON.stringify(o)).toString("base64");
 
 export function decodePaymentHeader(h) {
   try {
@@ -55,9 +84,11 @@ export function decodePaymentHeader(h) {
 }
 
 async function facilitator(cfg, op, body, fetchImpl) {
-  const res = await fetchImpl(`${cfg.facilitatorUrl}/${op}`, {
+  const url = `${cfg.facilitatorUrl}/${op}`;
+  const auth = cfg.cdpKey ? `Bearer ${await cdpJwt(cfg.cdpKey, "POST", url)}` : cfg.facilitatorAuth;
+  const res = await fetchImpl(url, {
     method: "POST",
-    headers: { "content-type": "application/json", ...(cfg.facilitatorAuth ? { authorization: cfg.facilitatorAuth } : {}) },
+    headers: { "content-type": "application/json", ...(auth ? { authorization: auth } : {}) },
     body: JSON.stringify(body),
   });
   const json = await res.json().catch(() => ({}));
@@ -70,6 +101,10 @@ export class Billing {
     this.store = store;
     this.cfg = cfg;
     this.fetch = fetchImpl;
+  }
+
+  x402Price(usd) {
+    return x402Price(this.cfg, usd);
   }
 
   async issueKey(ip, label) {
@@ -104,7 +139,7 @@ export class Billing {
   async authorize({ usd, apiKey, paymentHeader, ip, resource, description }) {
     if (!usd) return { allowed: true, mode: "free_tool", finalize: async () => ({}) };
 
-    if (paymentHeader) return this.authorizeX402({ usd, paymentHeader, resource, description });
+    if (paymentHeader) return this.authorizeX402({ usd: x402Price(this.cfg, usd), paymentHeader, resource, description, listUsd: usd });
 
     if (apiKey) {
       const id = `key:${hashKey(apiKey)}`;
@@ -122,7 +157,7 @@ export class Billing {
         await this.store.set(id, rec);
         return { allowed: true, mode: "credits", finalize: async () => { await this.record({ mode: "credits_used", usd, key: id.slice(4, 16) }); return { credits_left_usd: rec.credits_usd }; } };
       }
-      return this.paymentRequired(usd, resource, description, "Free calls for today are used and credits are insufficient.");
+      return this.paymentRequiredForCall(usd, resource, description, "Free calls for today are used and credits are insufficient.");
     }
 
     const day = today();
@@ -133,32 +168,44 @@ export class Billing {
       await this.store.set(anonId, anon);
       return { allowed: true, mode: "anonymous_trial", finalize: async () => ({ hint: "Get a free API key (POST /v1/keys) for more free calls per day." }) };
     }
-    return this.paymentRequired(usd, resource, description, "Anonymous trial calls are used for today.");
+    return this.paymentRequiredForCall(usd, resource, description, "Anonymous trial calls are used for today.");
   }
 
-  paymentRequired(usd, resource, description, reason) {
+  // 402 response: x402 v2 in the PAYMENT-REQUIRED header, v1 in the body for older clients.
+  // `usd` is the amount to collect over x402 (already floored for per-call prices).
+  paymentRequired(usd, resource, description, reason, listUsd = usd) {
+    const payable = Boolean(this.cfg.payTo);
     const body = {
       x402Version: 1,
       error: reason,
-      accepts: this.cfg.payTo ? [paymentRequirements(this.cfg, { usd, resource, description })] : [],
+      accepts: payable ? [paymentRequirements(this.cfg, { usd, resource, description })] : [],
       how_to_pay: [
-        "Pay per call: resend the request with an X-PAYMENT header (x402, USDC).",
-        "Or get a free API key: POST /v1/keys, then buy credits: POST /v1/credits?pack=5|20|100 with that key and an X-PAYMENT header.",
+        "Pay per call: resend the request with a PAYMENT-SIGNATURE header (x402 v2) or X-PAYMENT header (x402 v1), USDC on Base.",
+        "Or get a free API key: POST /v1/keys, then buy credits: POST /v1/credits?pack=5|20|100 with that key and an x402 payment. Credits are charged the list price.",
       ],
       price_usd: usd,
+      ...(listUsd !== usd ? { list_price_usd: listUsd, note: `Pay-per-call x402 minimum is $${this.cfg.minX402Usd}; prepaid credits pay the list price.` } : {}),
     };
-    return { allowed: false, status: 402, body };
+    const v2 = { x402Version: 2, error: reason, resource: { url: resource, description, mimeType: "application/json" }, accepts: payable ? [paymentRequirementsV2(this.cfg, { usd })] : [] };
+    return { allowed: false, status: 402, body, headers: { "payment-required": b64json(v2) } };
   }
 
-  async authorizeX402({ usd, paymentHeader, resource, description }) {
+  // Per-call price over x402, with the floor applied.
+  paymentRequiredForCall(usd, resource, description, reason) {
+    return this.paymentRequired(x402Price(this.cfg, usd), resource, description, reason, usd);
+  }
+
+  async authorizeX402({ usd, paymentHeader, resource, description, listUsd = usd }) {
     if (!this.cfg.payTo) return { allowed: false, status: 503, body: { error: "Payments are not enabled on this server yet." } };
     const payload = decodePaymentHeader(paymentHeader);
-    if (!payload) return { allowed: false, status: 400, body: { error: "X-PAYMENT header is not valid base64 JSON." } };
-    const reqs = paymentRequirements(this.cfg, { usd, resource, description });
-    const body = { x402Version: payload.x402Version || 1, paymentPayload: payload, paymentRequirements: reqs };
+    if (!payload) return { allowed: false, status: 400, body: { error: "Payment header is not valid base64 JSON." } };
+    const v2 = payload.x402Version === 2;
+    const reqs = v2 ? paymentRequirementsV2(this.cfg, { usd }) : paymentRequirements(this.cfg, { usd, resource, description });
+    const body = { x402Version: v2 ? 2 : 1, paymentPayload: payload, paymentRequirements: reqs };
     const v = await facilitator(this.cfg, "verify", body, this.fetch);
     if (!v.ok || !v.json.isValid) {
-      return { allowed: false, status: 402, body: { ...this.paymentRequired(usd, resource, description, `Payment rejected: ${v.json?.invalidReason || v.error}`).body } };
+      const reject = this.paymentRequired(usd, resource, description, `Payment rejected: ${v.json?.invalidReason || v.error}`, listUsd);
+      return { allowed: false, status: 402, body: reject.body, headers: reject.headers };
     }
     return {
       allowed: true,
@@ -167,8 +214,8 @@ export class Billing {
       finalize: async () => {
         const s = await facilitator(this.cfg, "settle", body, this.fetch);
         const ok = s.ok && s.json.success;
-        await this.record({ mode: ok ? "x402" : "x402_settle_failed", usd: ok ? usd : 0, payer: v.json.payer, tx: s.json?.transaction, network: this.cfg.network, resource });
-        return { paymentResponse: Buffer.from(JSON.stringify(s.json || {})).toString("base64"), settled: ok };
+        await this.record({ mode: ok ? "x402" : "x402_settle_failed", usd: ok ? usd : 0, payer: v.json.payer, tx: s.json?.transaction, network: this.cfg.network, x402Version: body.x402Version, resource, ...(ok ? {} : { error: s.json?.errorReason || s.error }) });
+        return { paymentResponse: b64json(s.json || {}), paymentResponseHeader: v2 ? "payment-response" : "x-payment-response", settled: ok };
       },
     };
   }

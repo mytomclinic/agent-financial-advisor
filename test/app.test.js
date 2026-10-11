@@ -34,8 +34,33 @@ test("anonymous trial, then 402 with x402 requirements", async () => {
   const r = await call("/v1/tools/position_size", { method: "POST", body: sizing });
   assert.equal(r.status, 402);
   const body = await r.json();
-  assert.equal(body.accepts[0].maxAmountRequired, "5000");
+  // $0.005 list price, raised to the $0.01 pay-per-call minimum.
+  assert.equal(body.accepts[0].maxAmountRequired, "10000");
   assert.equal(body.accepts[0].payTo, PAY_TO);
+  const v2 = JSON.parse(Buffer.from(r.headers.get("payment-required"), "base64").toString());
+  assert.equal(v2.x402Version, 2);
+  assert.equal(v2.accepts[0].network, "eip155:84532");
+  assert.equal(v2.accepts[0].amount, "10000");
+  assert.equal(v2.resource.url, `${BASE}/v1/tools/position_size`);
+});
+
+test("x402 v2 payment uses PAYMENT-SIGNATURE and returns PAYMENT-RESPONSE", async () => {
+  const bodies = [];
+  const fakeFetch = async (url, init) => {
+    bodies.push(JSON.parse(init.body));
+    const op = url.split("/").pop();
+    const body = op === "verify" ? { isValid: true, payer: "0xabc" } : { success: true, transaction: "0xtx", network: "eip155:84532", payer: "0xabc" };
+    return new Response(JSON.stringify(body), { status: 200 });
+  };
+  const { call } = setup({ payTo: PAY_TO, fetchImpl: fakeFetch });
+  const payment = Buffer.from(JSON.stringify({ x402Version: 2, accepted: {}, payload: {} })).toString("base64");
+  const r = await call("/v1/tools/position_size", { method: "POST", body: sizing, headers: { "payment-signature": payment } });
+  assert.equal(r.status, 200);
+  assert.ok(r.headers.get("payment-response"));
+  assert.equal(bodies[0].x402Version, 2);
+  assert.equal(bodies[0].paymentRequirements.amount, "10000");
+  assert.equal(bodies[0].paymentRequirements.network, "eip155:84532");
+  assert.equal((await r.json())._billing.price_usd, 0.01);
 });
 
 test("bad input is 400 and does not use quota", async () => {
