@@ -1,0 +1,18 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.mytomclinic/agent-financial-advisor",
+  "title": "Agent Financial Advisor",
+  "description": "Compliance, risk, tax and audit checks for AI trading agents: pre-trade, sizing, wash sales, Reg BI.",
+  "version": "0.1.0",
+  "websiteUrl": "https://agent-financial-advisor.agent-financial-advisor.workers.dev/",
+  "repository": {
+    "url": "https://github.com/mytomclinic/agent-financial-advisor",
+    "source": "github"
+  },
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://agent-financial-advisor.agent-financial-advisor.workers.dev/mcp"
+    }
+  ]
+}
