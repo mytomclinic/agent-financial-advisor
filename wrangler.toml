@@ -9,7 +9,7 @@ binding = "AFA_KV"
 id = "5b8c6d6b23614fb29180526e2457b437"
 
 [vars]
-X402_NETWORK = "base-sepolia"   # switch to "base" for real money once tested
+X402_NETWORK = "base"   # real USDC on Base mainnet; payments confirmed by the Coinbase CDP facilitator (CDP_API_KEY_JSON secret)
 FREE_DAILY_CALLS = "25"
 FREE_DAILY_ANON = "5"
 PAY_TO = "0x2475af09a9d4A50f7941209ee0e7b1EfA2FF73e5"  # Zach's Coinbase USDC address (Base); checksum verified 2026-10-11
