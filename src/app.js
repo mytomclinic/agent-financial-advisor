@@ -3,7 +3,8 @@
 import { TOOLS, TOOL_MAP } from "./tools/index.js";
 import { ValidationError } from "./lib/validate.js";
 import { RULES_VERSION } from "./lib/regs.js";
-import { CREDIT_PACKS } from "./billing/payments.js";
+import { CREDIT_PACKS, bazaarHttpPost } from "./billing/payments.js";
+import { EXAMPLES } from "./tools/examples.js";
 
 export const SERVICE = {
   name: "Agent Financial Advisor",
@@ -66,6 +67,24 @@ function openapi(base) {
   return { openapi: "3.1.0", info: { title: SERVICE.name, version: SERVICE.version, description: SERVICE.tagline }, servers: [{ url: base }], paths, components: { securitySchemes: { bearer: { type: "http", scheme: "bearer" } } } };
 }
 
+// Discovery info for the x402 Bazaar: the input schema, an example body, and the
+// example's top-level output fields (computed once per tool; handlers are pure).
+const discoveryCache = {};
+async function discoveryFor(tool) {
+  if (!EXAMPLES[tool.name]) return null;
+  if (!discoveryCache[tool.name]) {
+    let outputExample;
+    try {
+      const out = await tool.handler(structuredClone(EXAMPLES[tool.name]));
+      outputExample = Object.fromEntries(Object.entries(out).filter(([, v]) => v === null || typeof v !== "object").slice(0, 12));
+    } catch {
+      outputExample = undefined;
+    }
+    discoveryCache[tool.name] = bazaarHttpPost({ inputSchema: tool.inputSchema, example: EXAMPLES[tool.name], outputExample });
+  }
+  return discoveryCache[tool.name];
+}
+
 async function runTool(tool, args, ctx, req, base) {
   // Compute first (cheap, pure): bad input returns 400 without touching quota, credits or payment.
   let result;
@@ -80,7 +99,8 @@ async function runTool(tool, args, ctx, req, base) {
     paymentHeader: paymentHeader(req),
     ip: clientIp(req),
     resource: `${base}/v1/tools/${tool.name}`,
-    description: tool.title,
+    description: tool.description,
+    discovery: tool.price_usd ? await discoveryFor(tool) : null,
   });
   if (!auth.allowed) return { status: auth.status, body: auth.body, headers: auth.headers };
   const fin = await auth.finalize();
