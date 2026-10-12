@@ -42,6 +42,11 @@ test("anonymous trial, then 402 with x402 requirements", async () => {
   assert.equal(v2.accepts[0].network, "eip155:84532");
   assert.equal(v2.accepts[0].amount, "10000");
   assert.equal(v2.resource.url, `${BASE}/v1/tools/position_size`);
+  const bazaar = v2.extensions.bazaar;
+  assert.equal(bazaar.info.input.method, "POST");
+  assert.equal(bazaar.info.input.body.method, "fixed_fractional");
+  assert.equal(bazaar.info.output.example.quantity, 100);
+  assert.ok(v2.resource.description.length <= 500);
 });
 
 test("x402 v2 payment uses PAYMENT-SIGNATURE and returns PAYMENT-RESPONSE", async () => {
@@ -60,6 +65,9 @@ test("x402 v2 payment uses PAYMENT-SIGNATURE and returns PAYMENT-RESPONSE", asyn
   assert.equal(bodies[0].x402Version, 2);
   assert.equal(bodies[0].paymentRequirements.amount, "10000");
   assert.equal(bodies[0].paymentRequirements.network, "eip155:84532");
+  // The settled payload carries the resource and discovery info for the Bazaar.
+  assert.equal(bodies[1].paymentPayload.resource.url, `${BASE}/v1/tools/position_size`);
+  assert.equal(bodies[1].paymentPayload.extensions.bazaar.info.input.type, "http");
   assert.equal((await r.json())._billing.price_usd, 0.01);
 });
 

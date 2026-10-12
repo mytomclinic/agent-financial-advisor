@@ -75,6 +75,36 @@ export function paymentRequirementsV2(cfg, { usd }) {
 
 const b64json = (o) => Buffer.from(JSON.stringify(o)).toString("base64");
 
+// x402 `bazaar` extension: how to call a JSON POST endpoint, for discovery catalogs.
+export function bazaarHttpPost({ inputSchema, example, outputExample }) {
+  return {
+    info: {
+      input: { type: "http", method: "POST", bodyType: "json", body: example },
+      output: { type: "json", ...(outputExample ? { example: outputExample } : {}) },
+    },
+    schema: {
+      $schema: "https://json-schema.org/draft/2020-12/schema",
+      type: "object",
+      properties: {
+        input: {
+          type: "object",
+          properties: {
+            type: { type: "string", const: "http" },
+            method: { type: "string", enum: ["POST"] },
+            bodyType: { type: "string", enum: ["json"] },
+            body: inputSchema,
+            headers: { type: "object", additionalProperties: { type: "string" } },
+          },
+          required: ["type", "method", "bodyType", "body"],
+          additionalProperties: false,
+        },
+        output: { type: "object", properties: { type: { type: "string" }, example: { type: "object" } }, required: ["type"] },
+      },
+      required: ["input"],
+    },
+  };
+}
+
 export function decodePaymentHeader(h) {
   try {
     return JSON.parse(Buffer.from(h, "base64").toString("utf8"));
@@ -136,10 +166,10 @@ export class Billing {
   }
 
   // Decide whether a call may run. Returns {allowed, mode, charge, finalize()} or {allowed:false, status, body}.
-  async authorize({ usd, apiKey, paymentHeader, ip, resource, description }) {
+  async authorize({ usd, apiKey, paymentHeader, ip, resource, description, discovery = null }) {
     if (!usd) return { allowed: true, mode: "free_tool", finalize: async () => ({}) };
 
-    if (paymentHeader) return this.authorizeX402({ usd: x402Price(this.cfg, usd), paymentHeader, resource, description, listUsd: usd });
+    if (paymentHeader) return this.authorizeX402({ usd: x402Price(this.cfg, usd), paymentHeader, resource, description, listUsd: usd, discovery });
 
     if (apiKey) {
       const id = `key:${hashKey(apiKey)}`;
@@ -157,7 +187,7 @@ export class Billing {
         await this.store.set(id, rec);
         return { allowed: true, mode: "credits", finalize: async () => { await this.record({ mode: "credits_used", usd, key: id.slice(4, 16) }); return { credits_left_usd: rec.credits_usd }; } };
       }
-      return this.paymentRequiredForCall(usd, resource, description, "Free calls for today are used and credits are insufficient.");
+      return this.paymentRequiredForCall(usd, resource, description, "Free calls for today are used and credits are insufficient.", discovery);
     }
 
     const day = today();
@@ -168,12 +198,12 @@ export class Billing {
       await this.store.set(anonId, anon);
       return { allowed: true, mode: "anonymous_trial", finalize: async () => ({ hint: "Get a free API key (POST /v1/keys) for more free calls per day." }) };
     }
-    return this.paymentRequiredForCall(usd, resource, description, "Anonymous trial calls are used for today.");
+    return this.paymentRequiredForCall(usd, resource, description, "Anonymous trial calls are used for today.", discovery);
   }
 
   // 402 response: x402 v2 in the PAYMENT-REQUIRED header, v1 in the body for older clients.
   // `usd` is the amount to collect over x402 (already floored for per-call prices).
-  paymentRequired(usd, resource, description, reason, listUsd = usd) {
+  paymentRequired(usd, resource, description, reason, listUsd = usd, discovery = null) {
     const payable = Boolean(this.cfg.payTo);
     const body = {
       x402Version: 1,
@@ -186,25 +216,37 @@ export class Billing {
       price_usd: usd,
       ...(listUsd !== usd ? { list_price_usd: listUsd, note: `Pay-per-call x402 minimum is $${this.cfg.minX402Usd}; prepaid credits pay the list price.` } : {}),
     };
-    const v2 = { x402Version: 2, error: reason, resource: { url: resource, description, mimeType: "application/json" }, accepts: payable ? [paymentRequirementsV2(this.cfg, { usd })] : [] };
+    const v2 = {
+      x402Version: 2,
+      error: reason,
+      resource: { url: resource, description, mimeType: "application/json" },
+      accepts: payable ? [paymentRequirementsV2(this.cfg, { usd })] : [],
+      ...(discovery ? { extensions: { bazaar: discovery } } : {}),
+    };
     return { allowed: false, status: 402, body, headers: { "payment-required": b64json(v2) } };
   }
 
   // Per-call price over x402, with the floor applied.
-  paymentRequiredForCall(usd, resource, description, reason) {
-    return this.paymentRequired(x402Price(this.cfg, usd), resource, description, reason, usd);
+  paymentRequiredForCall(usd, resource, description, reason, discovery) {
+    return this.paymentRequired(x402Price(this.cfg, usd), resource, description, reason, usd, discovery);
   }
 
-  async authorizeX402({ usd, paymentHeader, resource, description, listUsd = usd }) {
+  async authorizeX402({ usd, paymentHeader, resource, description, listUsd = usd, discovery = null }) {
     if (!this.cfg.payTo) return { allowed: false, status: 503, body: { error: "Payments are not enabled on this server yet." } };
     const payload = decodePaymentHeader(paymentHeader);
     if (!payload) return { allowed: false, status: 400, body: { error: "Payment header is not valid base64 JSON." } };
     const v2 = payload.x402Version === 2;
+    // The Bazaar catalogs a resource from the settled payload, so make sure it carries
+    // the resource and discovery info even if the client didn't echo them.
+    if (v2) {
+      payload.resource ||= { url: resource, description, mimeType: "application/json" };
+      if (discovery) payload.extensions = { bazaar: discovery, ...(payload.extensions || {}) };
+    }
     const reqs = v2 ? paymentRequirementsV2(this.cfg, { usd }) : paymentRequirements(this.cfg, { usd, resource, description });
     const body = { x402Version: v2 ? 2 : 1, paymentPayload: payload, paymentRequirements: reqs };
     const v = await facilitator(this.cfg, "verify", body, this.fetch);
     if (!v.ok || !v.json.isValid) {
-      const reject = this.paymentRequired(usd, resource, description, `Payment rejected: ${v.json?.invalidReason || v.error}`, listUsd);
+      const reject = this.paymentRequired(usd, resource, description, `Payment rejected: ${v.json?.invalidReason || v.error}`, listUsd, discovery);
       return { allowed: false, status: 402, body: reject.body, headers: reject.headers };
     }
     return {
