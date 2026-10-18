@@ -146,6 +146,7 @@ export class Billing {
     const key = `afa_${randomBytes(24).toString("hex")}`;
     const rec = { created: new Date().toISOString(), label: label || null, credits_usd: 0, free_day: day, free_used: 0, calls: 0 };
     await this.store.set(`key:${hashKey(key)}`, rec);
+    await this.store.append("keys", { ts: rec.created });
     return { api_key: key, credits_usd: 0, free_calls_per_day: this.cfg.freeDailyPerKey };
   }
 

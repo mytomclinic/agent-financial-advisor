@@ -85,7 +85,7 @@ async function discoveryFor(tool) {
   return discoveryCache[tool.name];
 }
 
-async function runTool(tool, args, ctx, req, base) {
+async function runTool(tool, args, ctx, req, base, via) {
   // Compute first (cheap, pure): bad input returns 400 without touching quota, credits or payment.
   let result;
   try {
@@ -107,8 +107,33 @@ async function runTool(tool, args, ctx, req, base) {
   const headers = fin.paymentResponse ? { [fin.paymentResponseHeader]: fin.paymentResponse } : {};
   const charged = auth.mode === "x402" ? ctx.billing.x402Price(tool.price_usd) : tool.price_usd;
   const billing = { mode: auth.mode, price_usd: charged, ...(fin.credits_left_usd != null ? { credits_left_usd: fin.credits_left_usd } : {}), ...(fin.hint ? { hint: fin.hint } : {}) };
-  await ctx.store.append("usage", { ts: new Date().toISOString(), tool: tool.name, mode: auth.mode });
+  await ctx.store.append("usage", { ts: new Date().toISOString(), tool: tool.name, mode: auth.mode, via });
   return { status: 200, body: { ...result, _billing: billing }, headers };
+}
+
+// Public aggregate usage: counts only, no keys, IPs or payers. Cached per isolate
+// so a busy /stats can't run up KV list operations.
+const STATS_TTL_MS = 10 * 60 * 1000;
+const statsCache = new WeakMap(); // keyed by store
+async function publicStats(ctx) {
+  const hit = statsCache.get(ctx.store);
+  if (hit && Date.now() - hit.at < STATS_TTL_MS) return hit.body;
+  const [usage, ledger, keys] = await Promise.all([ctx.store.list("usage"), ctx.store.list("ledger"), ctx.store.list("keys")]);
+  const since = (days) => new Date(Date.now() - days * 864e5).toISOString();
+  const tally = (rows, field) => rows.reduce((o, r) => ((o[r[field] || "unknown"] = (o[r[field] || "unknown"] || 0) + 1), o), {});
+  const window = (rows) => ({ total: rows.length, last_7d: rows.filter((r) => r.ts >= since(7)).length, last_24h: rows.filter((r) => r.ts >= since(1)).length });
+  const paid = ledger.filter((r) => r.mode === "x402");
+  const cash = ledger.filter((r) => r.mode === "x402" || r.mode === "credit_purchase");
+  const body = {
+    as_of: new Date().toISOString(),
+    calls: { ...window(usage), by_tool: tally(usage, "tool"), by_mode: tally(usage, "mode"), by_interface: tally(usage, "via") },
+    paid_calls: window(paid),
+    api_keys_issued: window(keys),
+    revenue_usd: Math.round(cash.reduce((a, r) => a + r.usd, 0) * 1e6) / 1e6,
+    first_call: usage.reduce((m, r) => (!m || r.ts < m ? r.ts : m), null),
+  };
+  statsCache.set(ctx.store, { at: Date.now(), body });
+  return body;
 }
 
 async function handleMcp(req, ctx, base) {
@@ -137,7 +162,7 @@ async function handleMcp(req, ctx, base) {
       case "tools/call": {
         const tool = TOOL_MAP[m.params?.name];
         if (!tool) { fail(-32602, `Unknown tool: ${m.params?.name}`); break; }
-        const out = await runTool(tool, m.params?.arguments, ctx, req, base);
+        const out = await runTool(tool, m.params?.arguments, ctx, req, base, "mcp");
         const isError = out.status !== 200;
         reply({ content: [{ type: "text", text: JSON.stringify(out.body, null, 2) }], ...(isError ? { isError: true } : { structuredContent: out.body }) });
         break;
@@ -162,6 +187,7 @@ export async function handle(req, ctx) {
     if (req.method === "GET" && path === "/health") return json({ ok: true, version: SERVICE.version, rules_version: RULES_VERSION, payments_enabled: Boolean(ctx.billing.cfg.payTo), network: ctx.billing.cfg.network, facilitator: new URL(ctx.billing.cfg.facilitatorUrl).host, facilitator_auth: Boolean(ctx.billing.cfg.cdpKey || ctx.billing.cfg.facilitatorAuth) });
     if (req.method === "GET" && path === "/v1/tools") return json({ service: SERVICE, tools: TOOLS.map((t) => toolCard(t, base)) });
     if (req.method === "GET" && path === "/pricing") return json({ currency: "USD", per_call: Object.fromEntries(TOOLS.map((t) => [t.name, t.price_usd])), free_calls_per_day_with_key: ctx.billing.cfg.freeDailyPerKey, anonymous_trial_calls_per_day: ctx.billing.cfg.freeDailyAnon, credit_packs: CREDIT_PACKS, payment: { protocol: "x402", versions: [2, 1], asset: "USDC", network: ctx.billing.cfg.network, caip2: ctx.billing.cfg.caip2, min_per_call_usd: ctx.billing.cfg.minX402Usd } });
+    if (req.method === "GET" && path === "/stats") return json(await publicStats(ctx));
     if (req.method === "GET" && path === "/openapi.json") return json(openapi(base));
     if (req.method === "GET" && path === "/.well-known/x402") return json({ x402Version: 2, network: ctx.billing.cfg.caip2, payTo: ctx.billing.cfg.payTo, resources: TOOLS.filter((t) => t.price_usd).map((t) => ({ resource: `${base}/v1/tools/${t.name}`, method: "POST", price_usd: ctx.billing.x402Price(t.price_usd), list_price_usd: t.price_usd, description: t.description })) });
 
@@ -205,7 +231,7 @@ export async function handle(req, ctx) {
       if (!tool) return json({ error: `Unknown tool ${m[1]}`, tools: Object.keys(TOOL_MAP) }, 404);
       const args = await req.json().catch(() => null);
       if (args === null) return json({ error: "Body must be JSON." }, 400);
-      const out = await runTool(tool, args, ctx, req, base);
+      const out = await runTool(tool, args, ctx, req, base, "rest");
       return json(out.body, out.status, out.headers || {});
     }
 

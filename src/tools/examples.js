@@ -29,4 +29,15 @@ export const EXAMPLES = {
     allocation: { equity: 0.7, bonds: 0.25, cash: 0.05 },
     products: ["leveraged_etf"],
   },
+
+  options_risk_check: {
+    account: { type: "margin", equity: 50000, options_level: 3, shares_held: 100 },
+    underlying: { symbol: "AAPL", price: 200 },
+    legs: [
+      { type: "call", side: "short", strike: 210, expiry: "2026-11-20", quantity: 1, premium: 3.1 },
+      { type: "put", side: "short", strike: 190, expiry: "2026-11-20", quantity: 2, premium: 2.6 },
+      { type: "put", side: "long", strike: 180, expiry: "2026-11-20", quantity: 2, premium: 1.2 },
+    ],
+    as_of: "2026-10-19",
+  },
 };

@@ -119,3 +119,19 @@ test("MCP: initialize, list and call", async () => {
   const notif = await call("/mcp", { method: "POST", body: { jsonrpc: "2.0", method: "notifications/initialized" } });
   assert.equal(notif.status, 202);
 });
+
+test("public /stats shows aggregate usage without identities", async () => {
+  const { call } = setup();
+  await call("/v1/keys", { method: "POST", body: {} });
+  await call("/v1/tools/position_size", { method: "POST", body: sizing });
+  await call("/mcp", { method: "POST", body: { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "rules_digest", arguments: {} } } });
+  const s = await (await call("/stats")).json();
+  assert.equal(s.calls.total, 2);
+  assert.equal(s.calls.last_24h, 2);
+  assert.deepEqual(s.calls.by_interface, { rest: 1, mcp: 1 });
+  assert.equal(s.calls.by_tool.position_size, 1);
+  assert.equal(s.api_keys_issued.total, 1);
+  assert.equal(s.paid_calls.total, 0);
+  assert.equal(s.revenue_usd, 0);
+  assert.doesNotMatch(JSON.stringify(s), /1\.2\.3\.4|afa_/);
+});
