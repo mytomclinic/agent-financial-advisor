@@ -5,6 +5,7 @@ import { taxLotPlan } from "./taxLots.js";
 import { portfolioReview } from "./portfolioReview.js";
 import { strategyAudit } from "./strategyAudit.js";
 import { suitabilityCheck } from "./suitability.js";
+import { optionsRiskCheck } from "./optionsRisk.js";
 
 // Free: the hook. Agents trained before mid-2026 still believe the $25k PDT rule exists.
 const rulesDigest = {
@@ -21,5 +22,5 @@ const rulesDigest = {
   },
 };
 
-export const TOOLS = [rulesDigest, preTradeCheck, positionSize, taxLotPlan, portfolioReview, strategyAudit, suitabilityCheck];
+export const TOOLS = [rulesDigest, preTradeCheck, positionSize, taxLotPlan, portfolioReview, strategyAudit, suitabilityCheck, optionsRiskCheck];
 export const TOOL_MAP = Object.fromEntries(TOOLS.map((t) => [t.name, t]));

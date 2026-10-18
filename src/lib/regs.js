@@ -1,7 +1,7 @@
 // Regulatory rule table. Every value carries its source so agents (and we) can
 // check it. Reviewed weekly by the ops routine; bump RULES_VERSION on any change.
 
-export const RULES_VERSION = "2026-10-11";
+export const RULES_VERSION = "2026-10-18";
 
 export const RULES = {
   intraday_margin: {
@@ -72,6 +72,33 @@ export const RULES = {
     summary: "Gains on assets held more than one year are long-term.",
     long_term_after_days: 365,
     source: "26 U.S.C. 1222",
+  },
+  options_margin: {
+    title: "Margin on short equity options",
+    summary:
+      "An uncovered short equity option needs 100% of the option's market value plus 20% of the underlying's value, less any " +
+      "out-of-the-money amount, with a minimum of the option's value plus 10% of the underlying's value (calls) or 10% of the " +
+      "exercise price (puts). A short option paired with a long option of the same type that expires no earlier needs at most " +
+      "the spread's maximum loss. Long options must be paid in full.",
+    naked_pct: 0.2,
+    naked_min_pct: 0.1,
+    source: "FINRA Rule 4210(f)(2); 12 CFR 220.12(f)",
+  },
+  options_cash_account: {
+    title: "Options in a cash account",
+    summary:
+      "A cash account may buy options and write options only when covered: calls against shares held, puts secured by cash " +
+      "equal to the exercise value. Spreads and uncovered writing need a margin account.",
+    source: "12 CFR 220.8(a)(3)",
+  },
+  options_exercise: {
+    title: "Expiration exercise by exception and assignment",
+    summary:
+      "At expiration the OCC automatically exercises equity options that are $0.01 or more in the money unless the holder " +
+      "instructs otherwise. American-style short options can be assigned at any time; short calls are most at risk the day " +
+      "before an ex-dividend date when the dividend exceeds the option's remaining time value.",
+    auto_exercise_itm: 0.01,
+    source: "OCC Rule 805(d); OCC Characteristics and Risks of Standardized Options",
   },
   reg_bi: {
     title: "Regulation Best Interest and the adviser fiduciary duty",

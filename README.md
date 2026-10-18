@@ -15,11 +15,14 @@ Agents call it before they act; it answers with sourced, deterministic checks an
 | `portfolio_review` | $0.05 | Weights, HHI, sector/asset-class exposure, rebalance trades, Sharpe/Sortino/drawdown/VaR/beta |
 | `strategy_audit` | $0.10 | Trade stats, t-stat, Probabilistic and Deflated Sharpe Ratio, overfitting red flags |
 | `suitability_check` | $0.03 | Reg BI / fiduciary suitability review with a hashed audit memo |
+| `options_risk_check` | $0.01 | Covered/cash-secured/spread/naked classification, FINRA 4210 margin, cash-account limits, approval level, dividend early assignment, pin risk, auto-exercise, max loss, net Greeks |
+
+Drop-in code (Alpaca order guard, MCP client configs, x402 paying client): [examples/](examples/).
 
 ## Run locally (Node 20+, no dependencies)
 
 ```
-npm test          # 21 tests
+npm test          # 28 tests
 npm start         # http://localhost:8787  (payments off until PAY_TO is set)
 ```
 
@@ -45,6 +48,7 @@ MCP clients: point a streamable-HTTP MCP connection at `http://localhost:8787/mc
 | POST | `/v1/keys` | Free API key |
 | GET | `/v1/keys/me` | Key balance |
 | POST | `/v1/credits?pack=5\|20\|100` | Buy credits with x402 |
+| GET | `/stats` | Public aggregate usage: calls, paid calls, keys issued, revenue (no identities; cached 10 min) |
 | GET | `/admin/revenue` | Revenue and usage (ADMIN_TOKEN) |
 
 ## Configuration (env vars)
