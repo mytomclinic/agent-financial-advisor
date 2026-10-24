@@ -38,7 +38,7 @@ export function billingConfig(env = {}) {
   };
 }
 
-const hashKey = (k) => createHash("sha256").update(k).digest("hex");
+export const hashKey = (k) => createHash("sha256").update(k).digest("hex");
 const today = () => new Date().toISOString().slice(0, 10);
 export const atomic = (usd) => String(Math.round(usd * 1e6));
 

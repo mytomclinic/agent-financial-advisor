@@ -3,7 +3,8 @@
 import { TOOLS, TOOL_MAP } from "./tools/index.js";
 import { ValidationError } from "./lib/validate.js";
 import { RULES_VERSION } from "./lib/regs.js";
-import { CREDIT_PACKS, bazaarHttpPost } from "./billing/payments.js";
+import { CREDIT_PACKS, bazaarHttpPost, hashKey } from "./billing/payments.js";
+import { AuditLog } from "./billing/audit.js";
 import { EXAMPLES } from "./tools/examples.js";
 
 export const SERVICE = {
@@ -54,6 +55,7 @@ function overview(base) {
     `- MCP (streamable HTTP): ${base}/mcp`,
     "- Free trial: a few calls a day without a key. A free API key adds 25 free calls a day: over MCP, call the get_api_key tool (it attaches to your session); over REST, POST /v1/keys. URL-only MCP clients can use /mcp?key=<key>.",
     "- Pay per call with x402 (USDC on Base; minimum $0.01 per call), or prepay credits at list price: POST /v1/credits?pack=5|20|100 (packs of $20 and $100 include 10% and 20% bonus credit).",
+    "- Compliance records: every paid call made with an API key is logged in a hash-chained, signed audit log (GET /v1/audit, POST /v1/audit/verify).",
     "",
     "Outputs are automated analysis for software agents, not personalized investment, tax or legal advice.",
   ];
@@ -94,6 +96,9 @@ async function discoveryFor(tool) {
   return discoveryCache[tool.name];
 }
 
+const auditLog = (ctx) => ctx.audit || (ctx.audit = new AuditLog(ctx.store, ctx.auditSecret ?? ctx.adminToken));
+const auditId = (apiKey) => hashKey(apiKey).slice(0, 32);
+
 async function runTool(tool, args, ctx, req, base, via, apiKey = bearer(req)) {
   // Compute first (cheap, pure): bad input returns 400 without touching quota, credits or payment.
   let result;
@@ -115,9 +120,15 @@ async function runTool(tool, args, ctx, req, base, via, apiKey = bearer(req)) {
   const fin = await auth.finalize();
   const headers = fin.paymentResponse ? { [fin.paymentResponseHeader]: fin.paymentResponse } : {};
   const charged = auth.mode === "x402" ? ctx.billing.x402Price(tool.price_usd) : tool.price_usd;
+  // Keyed calls get a tamper-evident audit entry the customer can retrieve and verify later.
+  let audit;
+  if (apiKey && (auth.mode === "free_tier" || auth.mode === "credits")) {
+    const e = await auditLog(ctx).append(auditId(apiKey), { tool: tool.name, input: args, output: result });
+    audit = { seq: e.seq, hash: e.hash, input_sha256: e.input_sha256 };
+  }
   const billing = { mode: auth.mode, price_usd: charged, ...(fin.credits_left_usd != null ? { credits_left_usd: fin.credits_left_usd } : {}), ...(fin.hint ? { hint: fin.hint } : {}) };
   await ctx.store.append("usage", { ts: new Date().toISOString(), tool: tool.name, mode: auth.mode, via, src: sourceOf(req) });
-  return { status: 200, body: { ...result, _billing: billing }, headers };
+  return { status: 200, body: { ...result, _billing: billing, ...(audit ? { _audit: audit } : {}) }, headers };
 }
 
 // Public aggregate usage: counts only, no keys, IPs or payers. Cached per isolate
@@ -297,6 +308,26 @@ export async function handle(req, ctx) {
       if (args === null) return json({ error: "Body must be JSON." }, 400);
       const out = await runTool(tool, args, ctx, req, base, "rest");
       return json(out.body, out.status, out.headers || {});
+    }
+
+    if (req.method === "GET" && path === "/v1/audit") {
+      const k = bearer(req);
+      if (!k || !(await ctx.billing.keyInfo(k))) return json({ error: "Send your API key as Authorization: Bearer <key>." }, 401);
+      const log = auditLog(ctx);
+      const entries = await log.list(auditId(k));
+      const since = Number(url.searchParams.get("since_seq") || 0);
+      return json({
+        chain: log.verifyChain(entries),
+        entries: entries.filter((e) => e.seq > since),
+        how_to_verify: "input_sha256 is SHA-256 of your request body as canonical JSON (keys sorted, no whitespace). Each hash covers seq, ts, tool, input_sha256, output_sha256, decision, rules_version and prev_hash; prev_hash links to the entry before. POST entries to /v1/audit/verify to check the server signature.",
+      });
+    }
+    if (req.method === "POST" && path === "/v1/audit/verify") {
+      const body = await req.json().catch(() => null);
+      const list = Array.isArray(body?.entries) ? body.entries : body?.entry ? [body.entry] : null;
+      if (!list) return json({ error: "Send {entry} or {entries: [...]}" }, 400);
+      const log = auditLog(ctx);
+      return json({ entries: list.map((e) => ({ seq: e.seq, ...log.verifyEntry(e) })), ...(list.length > 1 ? { chain: ((sorted) => log.verifyChain(sorted, sorted[0].prev_hash))([...list].sort((a, b) => a.seq - b.seq)) } : {}) });
     }
 
     if (req.method === "GET" && path === "/admin/revenue") {

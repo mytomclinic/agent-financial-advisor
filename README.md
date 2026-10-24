@@ -49,6 +49,8 @@ the free `get_api_key` tool, which binds a new key to the MCP session. Add `?src
 | POST | `/v1/keys` | Free API key |
 | GET | `/v1/keys/me` | Key balance |
 | POST | `/v1/credits?pack=5\|20\|100` | Buy credits with x402 |
+| GET | `/v1/audit` | Your tamper-evident audit log: every keyed paid call, hash-chained and server-signed (`?since_seq=`) |
+| POST | `/v1/audit/verify` | Verify audit entries' hashes, signatures and chain |
 | GET | `/stats` | Public aggregate usage: calls, paid calls, keys issued, revenue (no identities; cached 10 min) |
 | GET | `/admin/revenue` | Revenue and usage (ADMIN_TOKEN) |
 
