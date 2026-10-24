@@ -11,6 +11,7 @@ const ctx = {
   billing: new Billing(store, billingConfig(env)),
   publicUrl: env.PUBLIC_URL || null,
   adminToken: env.ADMIN_TOKEN || null,
+  auditSecret: env.AUDIT_SECRET || null,
 };
 
 const port = Number(env.PORT || 8787);

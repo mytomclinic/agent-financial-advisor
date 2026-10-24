@@ -35,6 +35,6 @@ let store = null;
 export default {
   async fetch(request, env) {
     if (!store || store.kv !== env.AFA_KV) store = new KvStore(env.AFA_KV);
-    return handle(request, { store, billing: new Billing(store, billingConfig(env)), publicUrl: env.PUBLIC_URL || null, adminToken: env.ADMIN_TOKEN || null });
+    return handle(request, { store, billing: new Billing(store, billingConfig(env)), publicUrl: env.PUBLIC_URL || null, adminToken: env.ADMIN_TOKEN || null, auditSecret: env.AUDIT_SECRET || null });
   },
 };
