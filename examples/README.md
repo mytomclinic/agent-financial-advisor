@@ -18,6 +18,8 @@ claude mcp add --transport http agent-financial-advisor https://agent-financial-
 
 Then tell the agent: *"Before placing any order, call pre_trade_check and follow its decision."*
 
+**Free key, no signup:** when the anonymous trial runs out, the agent can call the `get_api_key` tool. The key attaches to the MCP session right away. To keep it across sessions, use `https://agent-financial-advisor.agent-financial-advisor.workers.dev/mcp?key=afa_...` as the MCP URL.
+
 ## Call over REST
 
 ```sh

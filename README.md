@@ -22,7 +22,7 @@ Drop-in code (Alpaca order guard, MCP client configs, x402 paying client): [exam
 ## Run locally (Node 20+, no dependencies)
 
 ```
-npm test          # 28 tests
+npm test
 npm start         # http://localhost:8787  (payments off until PAY_TO is set)
 ```
 
@@ -34,8 +34,9 @@ curl -X POST localhost:8787/v1/tools/position_size -H "content-type: application
   -d '{"equity":50000,"entry_price":100,"stop_price":95,"method":"fixed_fractional"}'
 ```
 
-MCP clients: point a streamable-HTTP MCP connection at `http://localhost:8787/mcp`
-(send `Authorization: Bearer <key>` for the keyed free tier and credits).
+MCP clients: point a streamable-HTTP MCP connection at `http://localhost:8787/mcp`.
+For the keyed free tier and credits, send `Authorization: Bearer <key>`, use `/mcp?key=<key>`, or have the agent call
+the free `get_api_key` tool, which binds a new key to the MCP session. Add `?src=<name>` to any URL to attribute usage in `/stats`.
 
 ## Endpoints
 

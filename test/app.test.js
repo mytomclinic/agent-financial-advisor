@@ -135,3 +135,40 @@ test("public /stats shows aggregate usage without identities", async () => {
   assert.equal(s.revenue_usd, 0);
   assert.doesNotMatch(JSON.stringify(s), /1\.2\.3\.4|afa_/);
 });
+
+test("MCP agent gets its own key mid-session and keeps going after the trial", async () => {
+  const { call } = setup({ payTo: PAY_TO });
+  const rpc = async (id, method, params, headers = {}) => {
+    const r = await call("/mcp?src=devto", { method: "POST", body: { jsonrpc: "2.0", id, method, params }, headers });
+    return { body: await r.json(), session: r.headers.get("mcp-session-id") };
+  };
+  const init = await rpc(1, "initialize", {});
+  assert.match(init.session, /^[a-f0-9]{32}$/);
+  const h = { "mcp-session-id": init.session };
+  const list = await rpc(2, "tools/list", {}, h);
+  assert.ok(list.body.result.tools.some((t) => t.name === "get_api_key"));
+
+  const callSize = (id) => rpc(id, "tools/call", { name: "position_size", arguments: sizing }, h);
+  assert.ok(!(await callSize(3)).body.result.isError); // anonymous trial (1/day in tests)
+  const blocked = (await callSize(4)).body.result;
+  assert.equal(blocked.isError, true);
+  assert.match(blocked.content[0].text, /get_api_key/);
+
+  const got = (await rpc(5, "tools/call", { name: "get_api_key", arguments: { label: "bot" } }, h)).body.result;
+  assert.equal(got.structuredContent.session_bound, true);
+  assert.match(got.structuredContent.api_key, /^afa_/);
+  const after = (await callSize(6)).body.result;
+  assert.ok(!after.isError);
+  assert.equal(after.structuredContent._billing.mode, "free_tier");
+
+  const s = await (await call("/stats")).json();
+  assert.equal(s.calls.by_source.devto, 2);
+  assert.equal(s.api_keys_issued.total, 1);
+});
+
+test("API key in the MCP URL query works for URL-only clients", async () => {
+  const { call } = setup({ payTo: PAY_TO });
+  const { api_key } = await (await call("/v1/keys", { method: "POST", body: {} })).json();
+  const r = await (await call(`/mcp?key=${api_key}`, { method: "POST", body: { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "position_size", arguments: sizing } } })).json();
+  assert.equal(r.result.structuredContent._billing.mode, "free_tier");
+});
