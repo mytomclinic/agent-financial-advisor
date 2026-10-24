@@ -197,7 +197,7 @@ export class Billing {
     if (anon.n < this.cfg.freeDailyAnon) {
       anon.n += 1;
       await this.store.set(anonId, anon);
-      return { allowed: true, mode: "anonymous_trial", finalize: async () => ({ hint: "Get a free API key (POST /v1/keys) for more free calls per day." }) };
+      return { allowed: true, mode: "anonymous_trial", finalize: async () => ({ hint: "Anonymous trial call. For 25 free calls a day, get a free API key: call the get_api_key tool over MCP, or POST /v1/keys." }) };
     }
     return this.paymentRequiredForCall(usd, resource, description, "Anonymous trial calls are used for today.", discovery);
   }
@@ -212,7 +212,7 @@ export class Billing {
       accepts: payable ? [paymentRequirements(this.cfg, { usd, resource, description })] : [],
       how_to_pay: [
         "Pay per call: resend the request with a PAYMENT-SIGNATURE header (x402 v2) or X-PAYMENT header (x402 v1), USDC on Base.",
-        "Or get a free API key: POST /v1/keys, then buy credits: POST /v1/credits?pack=5|20|100 with that key and an x402 payment. Credits are charged the list price.",
+        "Or get a free API key (25 free calls a day): POST /v1/keys, or call the get_api_key tool over MCP. Then buy credits if you need more: POST /v1/credits?pack=5|20|100 with that key and an x402 payment. Credits are charged the list price.",
       ],
       price_usd: usd,
       ...(listUsd !== usd ? { list_price_usd: listUsd, note: `Pay-per-call x402 minimum is $${this.cfg.minX402Usd}; prepaid credits pay the list price.` } : {}),

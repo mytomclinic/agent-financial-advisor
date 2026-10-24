@@ -13,11 +13,20 @@ export const SERVICE = {
 };
 
 const json = (body, status = 200, headers = {}) =>
-  new Response(JSON.stringify(body, null, 2), { status, headers: { "content-type": "application/json", "access-control-allow-origin": "*", "access-control-expose-headers": "payment-required, payment-response, x-payment-response", ...headers } });
+  new Response(JSON.stringify(body, null, 2), { status, headers: { "content-type": "application/json", "access-control-allow-origin": "*", "access-control-expose-headers": "payment-required, payment-response, x-payment-response, mcp-session-id", ...headers } });
 
 function bearer(req) {
   const h = req.headers.get("authorization") || "";
-  return h.toLowerCase().startsWith("bearer ") ? h.slice(7).trim() : req.headers.get("x-api-key");
+  if (h.toLowerCase().startsWith("bearer ")) return h.slice(7).trim();
+  // MCP clients that only take a URL can put the key in it: /mcp?key=afa_...
+  return req.headers.get("x-api-key") || new URL(req.url).searchParams.get("key");
+}
+
+// Where a caller came from, for /stats: ?src=devto on the URL, else the referring host.
+function sourceOf(req) {
+  const src = new URL(req.url).searchParams.get("src");
+  if (src && /^[a-z0-9_.-]{1,32}$/i.test(src)) return src.toLowerCase();
+  try { return new URL(req.headers.get("referer")).host || null; } catch { return null; }
 }
 
 // x402 v2 clients send PAYMENT-SIGNATURE; v1 clients send X-PAYMENT.
@@ -43,7 +52,7 @@ function overview(base) {
     "## Use",
     `- REST: POST ${base}/v1/tools/{name} with a JSON body. Schemas: GET ${base}/v1/tools, OpenAPI: ${base}/openapi.json`,
     `- MCP (streamable HTTP): ${base}/mcp`,
-    "- Free trial: a few calls a day without a key. Free API key (POST /v1/keys) adds 25 free calls a day.",
+    "- Free trial: a few calls a day without a key. A free API key adds 25 free calls a day: over MCP, call the get_api_key tool (it attaches to your session); over REST, POST /v1/keys. URL-only MCP clients can use /mcp?key=<key>.",
     "- Pay per call with x402 (USDC on Base; minimum $0.01 per call), or prepay credits at list price: POST /v1/credits?pack=5|20|100 (packs of $20 and $100 include 10% and 20% bonus credit).",
     "",
     "Outputs are automated analysis for software agents, not personalized investment, tax or legal advice.",
@@ -85,7 +94,7 @@ async function discoveryFor(tool) {
   return discoveryCache[tool.name];
 }
 
-async function runTool(tool, args, ctx, req, base, via) {
+async function runTool(tool, args, ctx, req, base, via, apiKey = bearer(req)) {
   // Compute first (cheap, pure): bad input returns 400 without touching quota, credits or payment.
   let result;
   try {
@@ -95,7 +104,7 @@ async function runTool(tool, args, ctx, req, base, via) {
   }
   const auth = await ctx.billing.authorize({
     usd: tool.price_usd,
-    apiKey: bearer(req),
+    apiKey,
     paymentHeader: paymentHeader(req),
     ip: clientIp(req),
     resource: `${base}/v1/tools/${tool.name}`,
@@ -107,7 +116,7 @@ async function runTool(tool, args, ctx, req, base, via) {
   const headers = fin.paymentResponse ? { [fin.paymentResponseHeader]: fin.paymentResponse } : {};
   const charged = auth.mode === "x402" ? ctx.billing.x402Price(tool.price_usd) : tool.price_usd;
   const billing = { mode: auth.mode, price_usd: charged, ...(fin.credits_left_usd != null ? { credits_left_usd: fin.credits_left_usd } : {}), ...(fin.hint ? { hint: fin.hint } : {}) };
-  await ctx.store.append("usage", { ts: new Date().toISOString(), tool: tool.name, mode: auth.mode, via });
+  await ctx.store.append("usage", { ts: new Date().toISOString(), tool: tool.name, mode: auth.mode, via, src: sourceOf(req) });
   return { status: 200, body: { ...result, _billing: billing }, headers };
 }
 
@@ -126,7 +135,7 @@ async function publicStats(ctx) {
   const cash = ledger.filter((r) => r.mode === "x402" || r.mode === "credit_purchase");
   const body = {
     as_of: new Date().toISOString(),
-    calls: { ...window(usage), by_tool: tally(usage, "tool"), by_mode: tally(usage, "mode"), by_interface: tally(usage, "via") },
+    calls: { ...window(usage), by_tool: tally(usage, "tool"), by_mode: tally(usage, "mode"), by_interface: tally(usage, "via"), by_source: tally(usage, "src") },
     paid_calls: window(paid),
     api_keys_issued: window(keys),
     revenue_usd: Math.round(cash.reduce((a, r) => a + r.usd, 0) * 1e6) / 1e6,
@@ -134,6 +143,32 @@ async function publicStats(ctx) {
   };
   statsCache.set(ctx.store, { at: Date.now(), body });
   return body;
+}
+
+// Free MCP-only tool: lets an agent get its own key mid-session, with no human signup.
+// The key is bound to the MCP session, so later calls in that session use it automatically.
+const GET_API_KEY = {
+  name: "get_api_key",
+  title: "Get a free API key",
+  description:
+    "Free. Creates an API key for this agent (25 free calls a day, then prepaid credits) and attaches it to this MCP session, " +
+    "so the next calls use it automatically. Call this when the anonymous trial runs out. Save the key and add ?key=<key> " +
+    "to the MCP URL (or send Authorization: Bearer <key>) to keep using it in later sessions.",
+  inputSchema: { type: "object", properties: { label: { type: "string", description: "Optional name for the key, such as your agent's name." } } },
+};
+
+const SESSION_TTL_NOTE = "Session keys are remembered for 48 hours.";
+
+// Plain-language next steps for an LLM that hit the paywall over MCP.
+function upgradeText(body, hasKey) {
+  const price = body.price_usd != null ? `$${body.price_usd}` : "a small fee";
+  const steps = [
+    hasKey
+      ? "1. Prepaid credits: POST /v1/credits?pack=5|20|100 with your key and an x402 payment (credits pay the list price)."
+      : "1. Free: call the get_api_key tool now. It gives this session 25 free calls a day and needs no signup.",
+    `2. Pay per call: ${price} in USDC on Base with x402 (needs an x402-capable client or wallet; see the PAYMENT-REQUIRED details below).`,
+  ];
+  return [`${body.error || "Payment required."}`, "", "Next steps:", ...steps].join("\n");
 }
 
 async function handleMcp(req, ctx, base) {
@@ -145,24 +180,53 @@ async function handleMcp(req, ctx, base) {
   }
   const batch = Array.isArray(msg) ? msg : [msg];
   const replies = [];
+  const headers = {};
+  let sessionId = req.headers.get("mcp-session-id");
+  if (sessionId && !/^[a-f0-9]{32}$/.test(sessionId)) sessionId = null;
+  const sessionKey = async () => (sessionId ? (await ctx.store.get(`mcpsess:${sessionId}`))?.key || null : null);
   for (const m of batch) {
     const reply = (result) => replies.push({ jsonrpc: "2.0", id: m.id, result });
     const fail = (code, message) => replies.push({ jsonrpc: "2.0", id: m.id ?? null, error: { code, message } });
     if (m.id === undefined) continue; // notification
     switch (m.method) {
       case "initialize":
+        sessionId = sessionId || crypto.randomUUID().replace(/-/g, "");
+        headers["mcp-session-id"] = sessionId;
         reply({ protocolVersion: m.params?.protocolVersion || "2025-06-18", capabilities: { tools: {} }, serverInfo: { name: "agent-financial-advisor", version: SERVICE.version }, instructions: overview(base) });
         break;
       case "ping":
         reply({});
         break;
       case "tools/list":
-        reply({ tools: TOOLS.map((t) => ({ name: t.name, title: t.title, description: `${t.description} Price: ${t.price_usd ? `$${t.price_usd}` : "free"}.`, inputSchema: t.inputSchema })) });
+        reply({
+          tools: [
+            ...TOOLS.map((t) => ({ name: t.name, title: t.title, description: `${t.description} Price: ${t.price_usd ? `$${t.price_usd}` : "free"}.`, inputSchema: t.inputSchema })),
+            { ...GET_API_KEY },
+          ],
+        });
         break;
       case "tools/call": {
+        if (m.params?.name === GET_API_KEY.name) {
+          const r = await ctx.billing.issueKey(clientIp(req), m.params?.arguments?.label);
+          if (r.error) { reply({ content: [{ type: "text", text: r.error }], isError: true }); break; }
+          if (sessionId) await ctx.store.set(`mcpsess:${sessionId}`, { key: r.api_key });
+          const text = [
+            `API key: ${r.api_key}`,
+            sessionId ? `It is attached to this MCP session, so your next calls use it automatically. ${SESSION_TTL_NOTE}` : "This client sent no MCP session id, so pass the key yourself.",
+            `To keep it for later sessions, add ?key=${r.api_key} to the MCP URL (${base}/mcp?key=...) or send Authorization: Bearer <key>.`,
+            `Free calls per day: ${r.free_calls_per_day}. After that, buy credits (POST ${base}/v1/credits?pack=5|20|100) or pay per call with x402.`,
+          ].join("\n");
+          reply({ content: [{ type: "text", text }], structuredContent: { ...r, session_bound: Boolean(sessionId) } });
+          break;
+        }
         const tool = TOOL_MAP[m.params?.name];
         if (!tool) { fail(-32602, `Unknown tool: ${m.params?.name}`); break; }
-        const out = await runTool(tool, m.params?.arguments, ctx, req, base, "mcp");
+        const key = bearer(req) || (await sessionKey());
+        const out = await runTool(tool, m.params?.arguments, ctx, req, base, "mcp", key);
+        if (out.status === 402) {
+          reply({ content: [{ type: "text", text: upgradeText(out.body, Boolean(key)) }, { type: "text", text: JSON.stringify(out.body, null, 2) }], isError: true });
+          break;
+        }
         const isError = out.status !== 200;
         reply({ content: [{ type: "text", text: JSON.stringify(out.body, null, 2) }], ...(isError ? { isError: true } : { structuredContent: out.body }) });
         break;
@@ -171,8 +235,8 @@ async function handleMcp(req, ctx, base) {
         fail(-32601, `Method not found: ${m.method}`);
     }
   }
-  if (!replies.length) return new Response(null, { status: 202 });
-  return json(Array.isArray(msg) ? replies : replies[0]);
+  if (!replies.length) return new Response(null, { status: 202, headers });
+  return json(Array.isArray(msg) ? replies : replies[0], 200, headers);
 }
 
 export async function handle(req, ctx) {
@@ -180,7 +244,7 @@ export async function handle(req, ctx) {
   const base = ctx.publicUrl || `${url.protocol}//${url.host}`;
   const path = url.pathname.replace(/\/+$/, "") || "/";
 
-  if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: { "access-control-allow-origin": "*", "access-control-allow-headers": "*", "access-control-allow-methods": "GET,POST,OPTIONS", "access-control-expose-headers": "payment-required, payment-response, x-payment-response" } });
+  if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: { "access-control-allow-origin": "*", "access-control-allow-headers": "*", "access-control-allow-methods": "GET,POST,OPTIONS", "access-control-expose-headers": "payment-required, payment-response, x-payment-response, mcp-session-id" } });
 
   try {
     if (req.method === "GET" && (path === "/" || path === "/llms.txt")) return new Response(overview(base), { headers: { "content-type": "text/markdown; charset=utf-8" } });
