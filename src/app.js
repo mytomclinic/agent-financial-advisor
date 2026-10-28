@@ -154,6 +154,19 @@ async function runTool(tool, args, ctx, req, base, via, apiKey = bearer(req)) {
 // so a busy /stats can't run up KV list operations.
 const STATS_TTL_MS = 10 * 60 * 1000;
 const statsCache = new WeakMap(); // keyed by store
+// Claude spend behind advisor_memo, so the weekly review can see demand against the daily cap.
+async function memoStats(writer, usage) {
+  const r6 = (n) => Math.round(n * 1e6) / 1e6;
+  const today = await writer.spentToday();
+  return {
+    paid_calls: usage.filter((u) => u.tool === "advisor_memo" && u.mode !== "anonymous_trial").length,
+    model_spend_today_usd: r6(today),
+    daily_cap_usd: writer.dailyCapUsd,
+    cap_reached_today: today >= writer.dailyCapUsd,
+    model_spend_month_usd: r6(await writer.spentThisMonth()),
+  };
+}
+
 async function publicStats(ctx) {
   const hit = statsCache.get(ctx.store);
   if (hit && Date.now() - hit.at < STATS_TTL_MS) return hit.body;
@@ -169,6 +182,7 @@ async function publicStats(ctx) {
     paid_calls: window(paid),
     api_keys_issued: window(keys),
     revenue_usd: Math.round(cash.reduce((a, r) => a + r.usd, 0) * 1e6) / 1e6,
+    ...(ctx.memoWriter ? { advisor_memo: await memoStats(ctx.memoWriter, usage) } : {}),
     first_call: usage.reduce((m, r) => (!m || r.ts < m ? r.ts : m), null),
   };
   statsCache.set(ctx.store, { at: Date.now(), body });

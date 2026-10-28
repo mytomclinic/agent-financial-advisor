@@ -55,6 +55,14 @@ export class ClaudeMemoWriter {
     return (await this.store.get(`memospend:${today()}`))?.usd || 0;
   }
 
+  // Month-to-date model spend, from the per-day meters.
+  async spentThisMonth(now = new Date()) {
+    const ym = now.toISOString().slice(0, 7);
+    const days = Array.from({ length: now.getUTCDate() }, (_, i) => `${ym}-${String(i + 1).padStart(2, "0")}`);
+    const vals = await Promise.all(days.map((d) => this.store.get(`memospend:${d}`)));
+    return vals.reduce((a, v) => a + (v?.usd || 0), 0);
+  }
+
   async available() {
     return Boolean(this.apiKey) && (await this.spentToday()) < this.dailyCapUsd;
   }

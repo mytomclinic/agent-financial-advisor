@@ -150,3 +150,15 @@ test("the Claude key is read from ANTHROPIC_API_KEY or the dashboard's anthropic
   assert.equal(anthropicKey({ "anthropic-api-key": " b\n" }), "b");
   assert.equal(anthropicKey({}), null);
 });
+
+test("/stats reports advisor_memo paid calls and Claude spend against the cap", async () => {
+  const { call, keyWithCredits } = setup();
+  const key = await keyWithCredits(1);
+  await call("/v1/tools/advisor_memo", { body: EXAMPLES.advisor_memo, headers: { authorization: `Bearer ${key}` } });
+  const s = (await (await call("/stats", { method: "GET" })).json()).advisor_memo;
+  assert.equal(s.paid_calls, 1);
+  assert.equal(s.daily_cap_usd, 3);
+  assert.equal(s.cap_reached_today, false);
+  assert.ok(s.model_spend_today_usd > 0);
+  assert.equal(s.model_spend_month_usd, s.model_spend_today_usd);
+});
