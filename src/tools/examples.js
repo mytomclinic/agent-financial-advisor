@@ -40,4 +40,13 @@ export const EXAMPLES = {
     ],
     as_of: "2026-10-19",
   },
+
+  advisor_memo: {
+    context: "Momentum entry on AAPL after earnings; plan to hold 2 to 6 weeks.",
+    trade: {
+      account: { type: "margin", equity: 100000, positions: [] },
+      order: { symbol: "AAPL", side: "buy", quantity: 50, limit_price: 200, stop_loss_price: 190 },
+      market: { last_price: 200, bid: 199.98, ask: 200.02, avg_daily_volume: 50000000 },
+    },
+  },
 };

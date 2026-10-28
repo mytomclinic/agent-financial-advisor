@@ -3,6 +3,7 @@ import { createServer } from "node:http";
 import { handle } from "./app.js";
 import { Billing, billingConfig } from "./billing/payments.js";
 import { FileStore } from "./billing/store.js";
+import { ClaudeMemoWriter } from "./advisor/claudeMemo.js";
 
 const env = process.env;
 const store = new FileStore(env.DATA_DIR || new URL("../data", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1"));
@@ -12,6 +13,7 @@ const ctx = {
   publicUrl: env.PUBLIC_URL || null,
   adminToken: env.ADMIN_TOKEN || null,
   auditSecret: env.AUDIT_SECRET || null,
+  memoWriter: env.ANTHROPIC_API_KEY ? new ClaudeMemoWriter({ apiKey: env.ANTHROPIC_API_KEY, store, dailyCapUsd: Number(env.MEMO_DAILY_CAP_USD || 3) }) : null,
 };
 
 const port = Number(env.PORT || 8787);

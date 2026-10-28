@@ -13,4 +13,5 @@ X402_NETWORK = "base"   # real USDC on Base mainnet; payments confirmed by the C
 FREE_DAILY_CALLS = "25"
 FREE_DAILY_ANON = "5"
 PAY_TO = "0x2475af09a9d4A50f7941209ee0e7b1EfA2FF73e5"  # Zach's Coinbase USDC address (Base); checksum verified 2026-10-11
-# Secrets (set with `npx wrangler secret put NAME`): ADMIN_TOKEN, CDP_API_KEY_JSON (required for "base")
+MEMO_DAILY_CAP_USD = "3"  # advisor_memo pauses itself once a day's Claude spend reaches this
+# Secrets (set with `npx wrangler secret put NAME`): ADMIN_TOKEN, CDP_API_KEY_JSON (required for "base"), ANTHROPIC_API_KEY (turns on advisor_memo)

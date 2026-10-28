@@ -35,8 +35,12 @@ const paymentHeader = (req) => req.headers.get("payment-signature") || req.heade
 
 const clientIp = (req) => req.headers.get("cf-connecting-ip") || (req.headers.get("x-forwarded-for") || "").split(",")[0].trim() || "local";
 
+// Input schema with a worked example, so an LLM can see a valid request before its first call.
+const schemaWithExample = (t) => (EXAMPLES[t.name] ? { ...t.inputSchema, examples: [EXAMPLES[t.name]] } : t.inputSchema);
+const priceText = (t) => (t.price_usd ? `$${t.price_usd}${t.paid_only ? ", paid only" : ""}` : "free");
+
 function toolCard(t, base) {
-  return { name: t.name, title: t.title, description: t.description, price_usd: t.price_usd, endpoint: `${base}/v1/tools/${t.name}`, input_schema: t.inputSchema };
+  return { name: t.name, title: t.title, description: t.description, price_usd: t.price_usd, ...(t.paid_only ? { paid_only: true } : {}), endpoint: `${base}/v1/tools/${t.name}`, input_schema: schemaWithExample(t) };
 }
 
 function overview(base) {
@@ -48,11 +52,12 @@ function overview(base) {
     "Call these before you act. Rule-based, deterministic, sourced to the regulation, and current (rules version " + RULES_VERSION + ").",
     "",
     "## Tools",
-    ...TOOLS.map((t) => `- **${t.name}** (${t.price_usd ? `$${t.price_usd}/call` : "free"}): ${t.description}`),
+    ...TOOLS.map((t) => `- **${t.name}** (${t.price_usd ? `$${t.price_usd}/call${t.paid_only ? ", paid only" : ""}` : "free"}): ${t.description}`),
     "",
     "## Use",
     `- REST: POST ${base}/v1/tools/{name} with a JSON body. Schemas: GET ${base}/v1/tools, OpenAPI: ${base}/openapi.json`,
     `- MCP (streamable HTTP): ${base}/mcp`,
+    "- Start here: call pre_trade_check before every order. Each tool's input schema carries a worked example (GET /v1/tools, or tools/list over MCP).",
     "- Free trial: a few calls a day without a key. A free API key adds 25 free calls a day: over MCP, call the get_api_key tool (it attaches to your session); over REST, POST /v1/keys. URL-only MCP clients can use /mcp?key=<key>.",
     "- Pay per call with x402 (USDC on Base; minimum $0.01 per call), or prepay credits at list price: POST /v1/credits?pack=5|20|100 (packs of $20 and $100 include 10% and 20% bonus credit).",
     "- Compliance records: every paid call made with an API key is logged in a hash-chained, signed audit log (GET /v1/audit, POST /v1/audit/verify).",
@@ -70,7 +75,7 @@ function openapi(base) {
         operationId: t.name,
         summary: t.title,
         description: `${t.description}\n\nPrice: ${t.price_usd ? `$${t.price_usd} per call` : "free"}.`,
-        requestBody: { required: true, content: { "application/json": { schema: t.inputSchema } } },
+        requestBody: { required: true, content: { "application/json": { schema: t.inputSchema, ...(EXAMPLES[t.name] ? { example: EXAMPLES[t.name] } : {}) } } },
         responses: { 200: { description: "Analysis result" }, 400: { description: "Invalid input" }, 402: { description: "Payment required (x402)" } },
       },
     };
@@ -107,7 +112,12 @@ async function runTool(tool, args, ctx, req, base, via, apiKey = bearer(req)) {
   } catch (e) {
     return { status: 400, body: { error: e.message, type: e instanceof ValidationError ? "validation" : "input" } };
   }
+  // Tools that call a paid model (advisor_memo) check availability before charging.
+  if (tool.compose && !(ctx.memoWriter && (await ctx.memoWriter.available()))) {
+    return { status: 503, body: { error: `${tool.name} is paused right now (not configured, or today's spending cap is reached). You were not charged. The individual tools (pre_trade_check, position_size, tax_lot_plan, options_risk_check, portfolio_review) still work.`, type: "unavailable" } };
+  }
   const auth = await ctx.billing.authorize({
+    paidOnly: Boolean(tool.paid_only),
     usd: tool.price_usd,
     apiKey,
     paymentHeader: paymentHeader(req),
@@ -117,6 +127,15 @@ async function runTool(tool, args, ctx, req, base, via, apiKey = bearer(req)) {
     discovery: tool.price_usd ? await discoveryFor(tool) : null,
   });
   if (!auth.allowed) return { status: auth.status, body: auth.body, headers: auth.headers };
+  if (tool.compose) {
+    try {
+      result = await tool.compose(result, args, ctx);
+    } catch (e) {
+      // Nothing is settled yet for x402; give prepaid credits back.
+      if (auth.mode === "credits") await ctx.billing.addCredits(apiKey, tool.price_usd);
+      return { status: 502, body: { error: `Could not write the memo (${e.message}). You were not charged; try again shortly.`, type: "upstream" } };
+    }
+  }
   const fin = await auth.finalize();
   const headers = fin.paymentResponse ? { [fin.paymentResponseHeader]: fin.paymentResponse } : {};
   const charged = auth.mode === "x402" ? ctx.billing.x402Price(tool.price_usd) : tool.price_usd;
@@ -171,12 +190,14 @@ const GET_API_KEY = {
 const SESSION_TTL_NOTE = "Session keys are remembered for 48 hours.";
 
 // Plain-language next steps for an LLM that hit the paywall over MCP.
-function upgradeText(body, hasKey) {
+function upgradeText(body, hasKey, paidOnly = false) {
   const price = body.price_usd != null ? `$${body.price_usd}` : "a small fee";
   const steps = [
     hasKey
       ? "1. Prepaid credits: POST /v1/credits?pack=5|20|100 with your key and an x402 payment (credits pay the list price)."
-      : "1. Free: call the get_api_key tool now. It gives this session 25 free calls a day and needs no signup.",
+      : paidOnly
+        ? "1. Call the get_api_key tool (free), then buy prepaid credits: POST /v1/credits?pack=5|20|100 with that key and an x402 payment. Free calls don't cover this tool."
+        : "1. Free: call the get_api_key tool now. It gives this session 25 free calls a day and needs no signup.",
     `2. Pay per call: ${price} in USDC on Base with x402 (needs an x402-capable client or wallet; see the PAYMENT-REQUIRED details below).`,
   ];
   return [`${body.error || "Payment required."}`, "", "Next steps:", ...steps].join("\n");
@@ -211,7 +232,7 @@ async function handleMcp(req, ctx, base) {
       case "tools/list":
         reply({
           tools: [
-            ...TOOLS.map((t) => ({ name: t.name, title: t.title, description: `${t.description} Price: ${t.price_usd ? `$${t.price_usd}` : "free"}.`, inputSchema: t.inputSchema })),
+            ...TOOLS.map((t) => ({ name: t.name, title: t.title, description: `${t.description} Price: ${priceText(t)}.`, inputSchema: schemaWithExample(t) })),
             { ...GET_API_KEY },
           ],
         });
@@ -235,7 +256,7 @@ async function handleMcp(req, ctx, base) {
         const key = bearer(req) || (await sessionKey());
         const out = await runTool(tool, m.params?.arguments, ctx, req, base, "mcp", key);
         if (out.status === 402) {
-          reply({ content: [{ type: "text", text: upgradeText(out.body, Boolean(key)) }, { type: "text", text: JSON.stringify(out.body, null, 2) }], isError: true });
+          reply({ content: [{ type: "text", text: upgradeText(out.body, Boolean(key), Boolean(tool.paid_only)) }, { type: "text", text: JSON.stringify(out.body, null, 2) }], isError: true });
           break;
         }
         const isError = out.status !== 200;

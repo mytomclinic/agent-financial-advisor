@@ -167,7 +167,8 @@ export class Billing {
   }
 
   // Decide whether a call may run. Returns {allowed, mode, charge, finalize()} or {allowed:false, status, body}.
-  async authorize({ usd, apiKey, paymentHeader, ip, resource, description, discovery = null }) {
+  // `paidOnly` tools skip the anonymous trial and the free daily calls on a key.
+  async authorize({ usd, apiKey, paymentHeader, ip, resource, description, discovery = null, paidOnly = false }) {
     if (!usd) return { allowed: true, mode: "free_tool", finalize: async () => ({}) };
 
     if (paymentHeader) return this.authorizeX402({ usd: x402Price(this.cfg, usd), paymentHeader, resource, description, listUsd: usd, discovery });
@@ -178,7 +179,7 @@ export class Billing {
       if (!rec) return { allowed: false, status: 401, body: { error: "Unknown API key." } };
       const day = today();
       if (rec.free_day !== day) { rec.free_day = day; rec.free_used = 0; }
-      if (rec.free_used < this.cfg.freeDailyPerKey) {
+      if (!paidOnly && rec.free_used < this.cfg.freeDailyPerKey) {
         rec.free_used += 1; rec.calls += 1;
         await this.store.set(id, rec);
         return { allowed: true, mode: "free_tier", finalize: async () => ({}) };
@@ -188,16 +189,17 @@ export class Billing {
         await this.store.set(id, rec);
         return { allowed: true, mode: "credits", finalize: async () => { await this.record({ mode: "credits_used", usd, key: id.slice(4, 16) }); return { credits_left_usd: rec.credits_usd }; } };
       }
-      return this.paymentRequiredForCall(usd, resource, description, "Free calls for today are used and credits are insufficient.", discovery);
+      return this.paymentRequiredForCall(usd, resource, description, paidOnly ? "This tool is paid only and the key's credits are insufficient." : "Free calls for today are used and credits are insufficient.", discovery);
     }
 
+    if (paidOnly) return this.paymentRequiredForCall(usd, resource, description, "This tool is paid only: pay per call with x402, or use an API key with prepaid credits.", discovery);
     const day = today();
     const anonId = `anon:${ip}:${day}`;
     const anon = (await this.store.get(anonId)) || { n: 0 };
     if (anon.n < this.cfg.freeDailyAnon) {
       anon.n += 1;
       await this.store.set(anonId, anon);
-      return { allowed: true, mode: "anonymous_trial", finalize: async () => ({ hint: "Anonymous trial call. For 25 free calls a day, get a free API key: call the get_api_key tool over MCP, or POST /v1/keys." }) };
+      return { allowed: true, mode: "anonymous_trial", finalize: async () => ({ hint: `Anonymous trial call ${anon.n} of ${this.cfg.freeDailyAnon} today. For 25 free calls a day, get a free API key: call the get_api_key tool over MCP, or POST /v1/keys.` }) };
     }
     return this.paymentRequiredForCall(usd, resource, description, "Anonymous trial calls are used for today.", discovery);
   }
