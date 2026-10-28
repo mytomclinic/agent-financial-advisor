@@ -15,6 +15,7 @@ Agents call it before they act; it answers with sourced, deterministic checks an
 | `portfolio_review` | $0.05 | Weights, HHI, sector/asset-class exposure, rebalance trades, Sharpe/Sortino/drawdown/VaR/beta |
 | `strategy_audit` | $0.10 | Trade stats, t-stat, Probabilistic and Deflated Sharpe Ratio, overfitting red flags |
 | `suitability_check` | $0.03 | Reg BI / fiduciary suitability review with a hashed audit memo |
+| `advisor_memo` | $0.10, paid only | Runs the checks above on a planned trade, options position or portfolio, then Claude writes a go / no-go memo with risks, required changes, rules cited and an audit note. Never looser than the rule checks |
 | `options_risk_check` | $0.01 | Covered/cash-secured/spread/naked classification, FINRA 4210 margin, cash-account limits, approval level, dividend early assignment, pin risk, auto-exercise, max loss, net Greeks |
 
 Drop-in code (Alpaca order guard, MCP client configs, x402 paying client): [examples/](examples/).
@@ -66,6 +67,8 @@ the free `get_api_key` tool, which binds a new key to the MCP session. Add `?src
 | `X402_MIN_USD` | `0.01` | Minimum pay-per-call x402 price (credits pay list price) |
 | `FREE_DAILY_CALLS` / `FREE_DAILY_ANON` | 25 / 5 | Free tier |
 | `ADMIN_TOKEN` | unset | For `/admin/revenue` |
+| `ANTHROPIC_API_KEY` | unset | Secret: turns on `advisor_memo` (Claude Sonnet 5.5). Unset = the tool answers 503 and charges nothing |
+| `MEMO_DAILY_CAP_USD` | 3 | Daily Claude spend cap for `advisor_memo`; past it the tool pauses until 00:00 UTC |
 | `DATA_DIR` | `./data` | Node store and ledger |
 | `PUBLIC_URL` | request host | Used in payment requirements |
 
@@ -74,6 +77,8 @@ the free `get_api_key` tool, which binds a new key to the MCP session. Add `?src
 Cloudflare Workers: `npx wrangler kv namespace create AFA_KV`, put the id in `wrangler.toml`, then `npx wrangler deploy`.
 
 Real USDC: `npx wrangler secret put CDP_API_KEY_JSON < secrets/cdp_api_key.json`, set `X402_NETWORK = "base"` in `wrangler.toml`, deploy.
+
+advisor_memo: `npx wrangler secret put ANTHROPIC_API_KEY < secrets/anthropic-key.txt`.
 
 ## Payments (x402)
 
