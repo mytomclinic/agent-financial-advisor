@@ -143,3 +143,10 @@ test("MCP paywall text for a paid-only tool points to credits, not free calls", 
   assert.equal(r.result.isError, true);
   assert.match(r.result.content[0].text, /Free calls don't cover this tool/);
 });
+
+test("the Claude key is read from ANTHROPIC_API_KEY or the dashboard's anthropic-api-key", async () => {
+  const { anthropicKey } = await import("../src/advisor/claudeMemo.js");
+  assert.equal(anthropicKey({ ANTHROPIC_API_KEY: "a" }), "a");
+  assert.equal(anthropicKey({ "anthropic-api-key": " b\n" }), "b");
+  assert.equal(anthropicKey({}), null);
+});

@@ -2,7 +2,7 @@
 // Needs a KV namespace bound as AFA_KV and the nodejs_compat flag (see wrangler.toml).
 import { handle } from "./app.js";
 import { Billing, billingConfig } from "./billing/payments.js";
-import { ClaudeMemoWriter } from "./advisor/claudeMemo.js";
+import { ClaudeMemoWriter, anthropicKey } from "./advisor/claudeMemo.js";
 
 class KvStore {
   constructor(kv) { this.kv = kv; }
@@ -37,7 +37,7 @@ export default {
   async fetch(request, env) {
     if (!store || store.kv !== env.AFA_KV) store = new KvStore(env.AFA_KV);
     // advisor_memo stays paused until the ANTHROPIC_API_KEY secret is set.
-    const memoWriter = env.ANTHROPIC_API_KEY ? new ClaudeMemoWriter({ apiKey: env.ANTHROPIC_API_KEY, store, dailyCapUsd: Number(env.MEMO_DAILY_CAP_USD || 3) }) : null;
+    const memoWriter = anthropicKey(env) ? new ClaudeMemoWriter({ apiKey: anthropicKey(env), store, dailyCapUsd: Number(env.MEMO_DAILY_CAP_USD || 3) }) : null;
     return handle(request, { store, billing: new Billing(store, billingConfig(env)), memoWriter, publicUrl: env.PUBLIC_URL || null, adminToken: env.ADMIN_TOKEN || null, auditSecret: env.AUDIT_SECRET || null });
   },
 };

@@ -32,6 +32,9 @@ const SYSTEM = [
   "This is automated analysis, not personalized investment, tax or legal advice.",
 ].join("\n\n");
 
+// The secret may be stored as ANTHROPIC_API_KEY or, as set in the Cloudflare dashboard, anthropic-api-key.
+export const anthropicKey = (env) => (env.ANTHROPIC_API_KEY || env["anthropic-api-key"] || "").trim() || null;
+
 const today = () => new Date().toISOString().slice(0, 10);
 
 export function costOf(usage = {}) {
