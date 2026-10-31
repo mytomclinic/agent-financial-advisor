@@ -59,6 +59,7 @@ function overview(base) {
     `- MCP (streamable HTTP): ${base}/mcp`,
     "- Start here: call pre_trade_check before every order. Each tool's input schema carries a worked example (GET /v1/tools, or tools/list over MCP).",
     "- Free trial: a few calls a day without a key. A free API key adds 25 free calls a day: over MCP, call the get_api_key tool (it attaches to your session); over REST, POST /v1/keys. URL-only MCP clients can use /mcp?key=<key>.",
+    "- Each API key's first advisor_memo is free. Check what a key has left with the my_account MCP tool or GET /v1/keys/me.",
     "- Pay per call with x402 (USDC on Base; minimum $0.01 per call), or prepay credits at list price: POST /v1/credits?pack=5|20|100 (packs of $20 and $100 include 10% and 20% bonus credit).",
     "- Compliance records: every paid call made with an API key is logged in a hash-chained, signed audit log (GET /v1/audit, POST /v1/audit/verify).",
     "",
@@ -118,6 +119,7 @@ async function runTool(tool, args, ctx, req, base, via, apiKey = bearer(req)) {
   }
   const auth = await ctx.billing.authorize({
     paidOnly: Boolean(tool.paid_only),
+    trial: Boolean(tool.first_call_free_per_key),
     usd: tool.price_usd,
     apiKey,
     paymentHeader: paymentHeader(req),
@@ -133,6 +135,7 @@ async function runTool(tool, args, ctx, req, base, via, apiKey = bearer(req)) {
     } catch (e) {
       // Nothing is settled yet for x402; give prepaid credits back.
       if (auth.mode === "credits") await ctx.billing.addCredits(apiKey, tool.price_usd);
+      if (auth.mode === "free_trial") await ctx.billing.restoreTrial(apiKey);
       return { status: 502, body: { error: `Could not write the memo (${e.message}). You were not charged; try again shortly.`, type: "upstream" } };
     }
   }
@@ -141,11 +144,11 @@ async function runTool(tool, args, ctx, req, base, via, apiKey = bearer(req)) {
   const charged = auth.mode === "x402" ? ctx.billing.x402Price(tool.price_usd) : tool.price_usd;
   // Keyed calls get a tamper-evident audit entry the customer can retrieve and verify later.
   let audit;
-  if (apiKey && (auth.mode === "free_tier" || auth.mode === "credits")) {
+  if (apiKey && (auth.mode === "free_tier" || auth.mode === "credits" || auth.mode === "free_trial")) {
     const e = await auditLog(ctx).append(auditId(apiKey), { tool: tool.name, input: args, output: result });
     audit = { seq: e.seq, hash: e.hash, input_sha256: e.input_sha256 };
   }
-  const billing = { mode: auth.mode, price_usd: charged, ...(fin.credits_left_usd != null ? { credits_left_usd: fin.credits_left_usd } : {}), ...(fin.hint ? { hint: fin.hint } : {}) };
+  const billing = { mode: auth.mode, price_usd: charged, ...(fin.credits_left_usd != null ? { credits_left_usd: fin.credits_left_usd } : {}), ...(fin.quota ? { quota: fin.quota } : {}), ...(fin.hint ? { hint: fin.hint } : {}) };
   await ctx.store.append("usage", { ts: new Date().toISOString(), tool: tool.name, mode: auth.mode, via, src: sourceOf(req) });
   return { status: 200, body: { ...result, _billing: billing, ...(audit ? { _audit: audit } : {}) }, headers };
 }
@@ -159,7 +162,8 @@ async function memoStats(writer, usage) {
   const r6 = (n) => Math.round(n * 1e6) / 1e6;
   const today = await writer.spentToday();
   return {
-    paid_calls: usage.filter((u) => u.tool === "advisor_memo" && u.mode !== "anonymous_trial").length,
+    paid_calls: usage.filter((u) => u.tool === "advisor_memo" && (u.mode === "credits" || u.mode === "x402")).length,
+    free_first_memos: usage.filter((u) => u.tool === "advisor_memo" && u.mode === "free_trial").length,
     model_spend_today_usd: r6(today),
     daily_cap_usd: writer.dailyCapUsd,
     cap_reached_today: today >= writer.dailyCapUsd,
@@ -201,6 +205,14 @@ const GET_API_KEY = {
   inputSchema: { type: "object", properties: { label: { type: "string", description: "Optional name for the key, such as your agent's name." } } },
 };
 
+// Free MCP-only tool: what this agent's key has left, so it can plan spend instead of hitting a 402.
+const MY_ACCOUNT = {
+  name: "my_account",
+  title: "Check this agent's key",
+  description: "Free. Shows the API key's free calls left today and when they reset, prepaid credit balance, whether its one free advisor_memo is still available, and how to add credits.",
+  inputSchema: { type: "object", properties: {} },
+};
+
 const SESSION_TTL_NOTE = "Session keys are remembered for 48 hours.";
 
 // Plain-language next steps for an LLM that hit the paywall over MCP.
@@ -210,7 +222,7 @@ function upgradeText(body, hasKey, paidOnly = false) {
     hasKey
       ? "1. Prepaid credits: POST /v1/credits?pack=5|20|100 with your key and an x402 payment (credits pay the list price)."
       : paidOnly
-        ? "1. Call the get_api_key tool (free), then buy prepaid credits: POST /v1/credits?pack=5|20|100 with that key and an x402 payment. Free calls don't cover this tool."
+        ? "1. Call the get_api_key tool (free). A new key's first advisor_memo is free; after that, buy prepaid credits: POST /v1/credits?pack=5|20|100 with that key and an x402 payment. The daily free calls don't cover this tool."
         : "1. Free: call the get_api_key tool now. It gives this session 25 free calls a day and needs no signup.",
     `2. Pay per call: ${price} in USDC on Base with x402 (needs an x402-capable client or wallet; see the PAYMENT-REQUIRED details below).`,
   ];
@@ -248,6 +260,7 @@ async function handleMcp(req, ctx, base) {
           tools: [
             ...TOOLS.map((t) => ({ name: t.name, title: t.title, description: `${t.description} Price: ${priceText(t)}.`, inputSchema: schemaWithExample(t) })),
             { ...GET_API_KEY },
+            { ...MY_ACCOUNT },
           ],
         });
         break;
@@ -263,6 +276,14 @@ async function handleMcp(req, ctx, base) {
             `Free calls per day: ${r.free_calls_per_day}. After that, buy credits (POST ${base}/v1/credits?pack=5|20|100) or pay per call with x402.`,
           ].join("\n");
           reply({ content: [{ type: "text", text }], structuredContent: { ...r, session_bound: Boolean(sessionId) } });
+          break;
+        }
+        if (m.params?.name === MY_ACCOUNT.name) {
+          const k = bearer(req) || (await sessionKey());
+          const info = k && (await ctx.billing.keyInfo(k));
+          if (!info) { reply({ content: [{ type: "text", text: "No API key on this session. Call get_api_key (free) to get one." }], isError: true }); break; }
+          const body = { ...info, add_credits: `POST ${base}/v1/credits?pack=5|20|100 with Authorization: Bearer <key> and an x402 payment`, prices_usd: Object.fromEntries(TOOLS.map((t) => [t.name, t.price_usd])) };
+          reply({ content: [{ type: "text", text: JSON.stringify(body, null, 2) }], structuredContent: body });
           break;
         }
         const tool = TOOL_MAP[m.params?.name];

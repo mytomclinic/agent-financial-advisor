@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { handle } from "../src/app.js";
 import { Billing, billingConfig } from "../src/billing/payments.js";
 import { MemoryStore } from "../src/billing/store.js";
+import { EXAMPLES } from "../src/tools/examples.js";
 
 const BASE = "http://test.local";
 const PAY_TO = "0x000000000000000000000000000000000000dEaD";
@@ -171,4 +172,24 @@ test("API key in the MCP URL query works for URL-only clients", async () => {
   const { api_key } = await (await call("/v1/keys", { method: "POST", body: {} })).json();
   const r = await (await call(`/mcp?key=${api_key}`, { method: "POST", body: { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "position_size", arguments: sizing } } })).json();
   assert.equal(r.result.structuredContent._billing.mode, "free_tier");
+});
+
+test("keyed free calls report the quota and warn near the limit; my_account shows it over MCP", async () => {
+  const store = new MemoryStore();
+  const billing = new Billing(store, billingConfig({ PAY_TO: "0x000000000000000000000000000000000000dEaD", FREE_DAILY_CALLS: "5" }));
+  const ctx = { store, billing, adminToken: "admin" };
+  const post = (path, body, headers = {}) => handle(new Request(`http://t.local${path}`, { method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(body) }), ctx);
+  const { api_key } = await (await post("/v1/keys", {})).json();
+  const auth = { authorization: `Bearer ${api_key}` };
+  const body = EXAMPLES.position_size;
+  const first = (await (await post("/v1/tools/position_size", body, auth)).json())._billing;
+  assert.deepEqual([first.quota.free_calls_used, first.quota.free_calls_per_day], [1, 5]);
+  assert.ok(first.quota.resets_at.endsWith("T00:00:00.000Z"));
+  assert.equal(first.hint, undefined);
+  for (let i = 0; i < 3; i++) await post("/v1/tools/position_size", body, auth);
+  const fifth = (await (await post("/v1/tools/position_size", body, auth)).json())._billing;
+  assert.match(fifth.hint, /0 free calls left today/);
+  const mcp = await (await post("/mcp", { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "my_account", arguments: {} } }, auth)).json();
+  assert.equal(mcp.result.structuredContent.free_calls_left_today, 0);
+  assert.equal(mcp.result.structuredContent.first_paid_call_free_available, true);
 });
