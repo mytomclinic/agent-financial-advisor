@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { handle } from "../src/app.js";
-import { Billing, billingConfig } from "../src/billing/payments.js";
+import { Billing, billingConfig, hashKey } from "../src/billing/payments.js";
 import { MemoryStore } from "../src/billing/store.js";
 import { ClaudeMemoWriter, costOf } from "../src/advisor/claudeMemo.js";
 import { EXAMPLES } from "../src/tools/examples.js";
@@ -33,20 +33,32 @@ function setup({ claude, apiKey = "sk-test", cap = 3 } = {}) {
   const ctx = { store, billing, memoWriter, adminToken: "admin" };
   const call = (path, { method = "POST", body, headers = {} } = {}) =>
     handle(new Request(`${BASE}${path}`, { method, headers: { "content-type": "application/json", "x-forwarded-for": "1.2.3.4", ...headers }, body: body ? JSON.stringify(body) : undefined }), ctx);
-  const keyWithCredits = async (usd) => {
+  // Most tests want the paid path, so the key's one free memo is spent unless asked otherwise.
+  const keyWithCredits = async (usd, { trialUsed = true } = {}) => {
     const { api_key } = await (await call("/v1/keys", { body: {} })).json();
     await billing.addCredits(api_key, usd);
+    if (trialUsed) {
+      const id = `key:${hashKey(api_key)}`;
+      await store.set(id, { ...(await store.get(id)), trial_used: true });
+    }
     return api_key;
   };
   return { call, store, billing, keyWithCredits };
 }
 
-test("advisor_memo is paid only: no anonymous trial, no free key calls", async () => {
-  const { call } = setup();
+test("advisor_memo is paid only: no anonymous trial, one free memo per key, then pay", async () => {
+  const { call, billing } = setup();
   const anon = await call("/v1/tools/advisor_memo", { body: EXAMPLES.advisor_memo });
   assert.equal(anon.status, 402);
   assert.match((await anon.json()).error, /paid only/);
   const { api_key } = await (await call("/v1/keys", { body: {} })).json();
+  assert.equal((await billing.keyInfo(api_key)).first_paid_call_free_available, true);
+  const first = await call("/v1/tools/advisor_memo", { body: EXAMPLES.advisor_memo, headers: { authorization: `Bearer ${api_key}` } });
+  assert.equal(first.status, 200);
+  const fb = (await first.json())._billing;
+  assert.equal(fb.mode, "free_trial");
+  assert.match(fb.hint, /first call was free/);
+  assert.equal((await billing.keyInfo(api_key)).first_paid_call_free_available, false);
   const keyed = await call("/v1/tools/advisor_memo", { body: EXAMPLES.advisor_memo, headers: { authorization: `Bearer ${api_key}` } });
   assert.equal(keyed.status, 402);
   const body = await keyed.json();
@@ -96,6 +108,14 @@ test("a failed memo refunds credits and says so", async () => {
   assert.equal((await billing.keyInfo(key)).credits_usd, 1);
 });
 
+test("a failed free memo gives the free memo back", async () => {
+  const { call, keyWithCredits, billing } = setup({ claude: fakeClaude({ status: 529 }) });
+  const key = await keyWithCredits(0, { trialUsed: false });
+  const r = await call("/v1/tools/advisor_memo", { body: EXAMPLES.advisor_memo, headers: { authorization: `Bearer ${key}` } });
+  assert.equal(r.status, 502);
+  assert.equal((await billing.keyInfo(key)).first_paid_call_free_available, true);
+});
+
 test("advisor_memo pauses without an API key or past the daily cap, before charging", async () => {
   const off = setup({ apiKey: null });
   const r = await off.call("/v1/tools/advisor_memo", { body: EXAMPLES.advisor_memo });
@@ -141,7 +161,7 @@ test("MCP paywall text for a paid-only tool points to credits, not free calls", 
   const { call } = setup();
   const r = await (await call("/mcp", { body: { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "advisor_memo", arguments: EXAMPLES.advisor_memo } } })).json();
   assert.equal(r.result.isError, true);
-  assert.match(r.result.content[0].text, /Free calls don't cover this tool/);
+  assert.match(r.result.content[0].text, /first advisor_memo is free.*daily free calls don't cover this tool/s);
 });
 
 test("the Claude key is read from ANTHROPIC_API_KEY or the dashboard's anthropic-api-key", async () => {

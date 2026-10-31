@@ -31,11 +31,12 @@ export const advisorMemo = {
   title: "Advisor memo (written by Claude)",
   price_usd: 0.1,
   paid_only: true,
+  first_call_free_per_key: true,
   description:
     "Send a planned trade, options position or portfolio and get a written decision memo: proceed, proceed with changes, or do not proceed, " +
     "with the risks, the exact changes to make, the rules that apply and a dated note for your audit file. Runs pre_trade_check, " +
     "position_size, tax_lot_plan, options_risk_check and portfolio_review on whichever sections you send, then Claude writes the memo; " +
-    "it never overrides a failed check. Paid only (credits or x402); free and trial calls don't cover it.",
+    "it never overrides a failed check. Paid only (credits or x402), except that each API key's first memo is free; the daily free calls and the anonymous trial don't cover it.",
   inputSchema: {
     type: "object",
     properties: {

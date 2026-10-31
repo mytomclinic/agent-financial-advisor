@@ -40,6 +40,8 @@ export function billingConfig(env = {}) {
 
 export const hashKey = (k) => createHash("sha256").update(k).digest("hex");
 const today = () => new Date().toISOString().slice(0, 10);
+// Free calls reset at the next UTC midnight.
+const resetsAt = () => { const d = new Date(); return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 1)).toISOString(); };
 export const atomic = (usd) => String(Math.round(usd * 1e6));
 
 export const x402Price = (cfg, usd) => Math.max(usd, cfg.minX402Usd || 0);
@@ -154,7 +156,14 @@ export class Billing {
     const rec = await this.store.get(`key:${hashKey(key)}`);
     if (!rec) return null;
     const freeLeft = rec.free_day === today() ? Math.max(0, this.cfg.freeDailyPerKey - rec.free_used) : this.cfg.freeDailyPerKey;
-    return { credits_usd: rec.credits_usd, free_calls_left_today: freeLeft, calls: rec.calls, created: rec.created };
+    return { credits_usd: rec.credits_usd, free_calls_left_today: freeLeft, free_calls_per_day: this.cfg.freeDailyPerKey, resets_at: resetsAt(), first_paid_call_free_available: !rec.trial_used, calls: rec.calls, created: rec.created };
+  }
+
+  // Give back the one free paid-tool call when the call itself failed.
+  async restoreTrial(key) {
+    const id = `key:${hashKey(key)}`;
+    const rec = await this.store.get(id);
+    if (rec?.trial_used) { rec.trial_used = false; await this.store.set(id, rec); }
   }
 
   async addCredits(key, usd) {
@@ -168,7 +177,8 @@ export class Billing {
 
   // Decide whether a call may run. Returns {allowed, mode, charge, finalize()} or {allowed:false, status, body}.
   // `paidOnly` tools skip the anonymous trial and the free daily calls on a key.
-  async authorize({ usd, apiKey, paymentHeader, ip, resource, description, discovery = null, paidOnly = false }) {
+  // `trial` lets each key make one free call to a paid-only tool, so agents can see what it's worth.
+  async authorize({ usd, apiKey, paymentHeader, ip, resource, description, discovery = null, paidOnly = false, trial = false }) {
     if (!usd) return { allowed: true, mode: "free_tool", finalize: async () => ({}) };
 
     if (paymentHeader) return this.authorizeX402({ usd: x402Price(this.cfg, usd), paymentHeader, resource, description, listUsd: usd, discovery });
@@ -179,10 +189,22 @@ export class Billing {
       if (!rec) return { allowed: false, status: 401, body: { error: "Unknown API key." } };
       const day = today();
       if (rec.free_day !== day) { rec.free_day = day; rec.free_used = 0; }
+      if (paidOnly && trial && !rec.trial_used) {
+        rec.trial_used = true; rec.calls += 1;
+        await this.store.set(id, rec);
+        return { allowed: true, mode: "free_trial", finalize: async () => ({ hint: `This first call was free (one per key). Later calls cost $${usd}: buy credits with POST /v1/credits?pack=5|20|100 and an x402 payment, or pay per call with x402.` }) };
+      }
       if (!paidOnly && rec.free_used < this.cfg.freeDailyPerKey) {
         rec.free_used += 1; rec.calls += 1;
         await this.store.set(id, rec);
-        return { allowed: true, mode: "free_tier", finalize: async () => ({}) };
+        const limit = this.cfg.freeDailyPerKey;
+        const left = limit - rec.free_used;
+        const quota = { free_calls_used: rec.free_used, free_calls_per_day: limit, resets_at: resetsAt() };
+        // Near the limit, say what happens next so the agent can plan instead of hitting a 402.
+        const hint = left <= Math.ceil(limit * 0.2)
+          ? `${left} free call${left === 1 ? "" : "s"} left today. After that this key needs prepaid credits (POST /v1/credits?pack=5|20|100 with an x402 payment; $5 covers ${Math.floor(5 / usd)} calls of this tool), or pay per call with x402.`
+          : null;
+        return { allowed: true, mode: "free_tier", finalize: async () => ({ quota, ...(hint ? { hint } : {}) }) };
       }
       if (rec.credits_usd + 1e-9 >= usd) {
         rec.credits_usd = Math.round((rec.credits_usd - usd) * 1e6) / 1e6; rec.calls += 1;
@@ -192,7 +214,7 @@ export class Billing {
       return this.paymentRequiredForCall(usd, resource, description, paidOnly ? "This tool is paid only and the key's credits are insufficient." : "Free calls for today are used and credits are insufficient.", discovery);
     }
 
-    if (paidOnly) return this.paymentRequiredForCall(usd, resource, description, "This tool is paid only: pay per call with x402, or use an API key with prepaid credits.", discovery);
+    if (paidOnly) return this.paymentRequiredForCall(usd, resource, description, trial ? "This tool is paid only: pay per call with x402, or use an API key (a new key's first call to it is free, then prepaid credits)." : "This tool is paid only: pay per call with x402, or use an API key with prepaid credits.", discovery);
     const day = today();
     const anonId = `anon:${ip}:${day}`;
     const anon = (await this.store.get(anonId)) || { n: 0 };
