@@ -25,8 +25,8 @@ const rulesDigest = {
       rules,
       next_steps: [
         "Check every order before you send it: pre_trade_check ($0.005). A minimal request is in `example_pre_trade_check`.",
-        "Free API key with 25 free calls a day: call get_api_key over MCP, or POST /v1/keys.",
-        "For a written go / no-go memo you can log, send the same order to advisor_memo as {trade: <that request>} ($0.10, paid only).",
+        "Free API key with 25 free calls a day: call get_api_key over MCP (then pass it as the api_key argument), or POST /v1/keys.",
+        "For a written go / no-go memo you can log, send the same order to advisor_memo as {trade: <that request>} ($0.10; each key's first memo is free).",
       ],
       example_pre_trade_check: EXAMPLES.pre_trade_check,
     };

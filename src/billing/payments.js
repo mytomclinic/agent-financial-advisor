@@ -139,7 +139,7 @@ export class Billing {
     return x402Price(this.cfg, usd);
   }
 
-  async issueKey(ip, label) {
+  async issueKey(ip, label, via = "rest") {
     const day = today();
     const ipRec = (await this.store.get(`ipkeys:${ip}:${day}`)) || { n: 0 };
     if (ipRec.n >= this.cfg.maxKeysPerIpPerDay) return { error: "Too many keys created from this address today." };
@@ -148,7 +148,7 @@ export class Billing {
     const key = `afa_${randomBytes(24).toString("hex")}`;
     const rec = { created: new Date().toISOString(), label: label || null, credits_usd: 0, free_day: day, free_used: 0, calls: 0 };
     await this.store.set(`key:${hashKey(key)}`, rec);
-    await this.store.append("keys", { ts: rec.created });
+    await this.store.append("keys", { ts: rec.created, via });
     return { api_key: key, credits_usd: 0, free_calls_per_day: this.cfg.freeDailyPerKey };
   }
 
@@ -221,7 +221,7 @@ export class Billing {
     if (anon.n < this.cfg.freeDailyAnon) {
       anon.n += 1;
       await this.store.set(anonId, anon);
-      return { allowed: true, mode: "anonymous_trial", finalize: async () => ({ hint: `Anonymous trial call ${anon.n} of ${this.cfg.freeDailyAnon} today. For 25 free calls a day, get a free API key: call the get_api_key tool over MCP, or POST /v1/keys.` }) };
+      return { allowed: true, mode: "anonymous_trial", finalize: async () => ({ hint: `Anonymous trial call ${anon.n} of ${this.cfg.freeDailyAnon} today. For 25 free calls a day, get a free API key: call the get_api_key tool over MCP, or POST /v1/keys. Already have a key? Over MCP pass it as the api_key argument; over REST send Authorization: Bearer <key>.` }) };
     }
     return this.paymentRequiredForCall(usd, resource, description, "Anonymous trial calls are used for today.", discovery);
   }
