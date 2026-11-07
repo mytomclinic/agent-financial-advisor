@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { handle } from "../src/app.js";
-import { Billing, billingConfig } from "../src/billing/payments.js";
+import { Billing, billingConfig, hashKey } from "../src/billing/payments.js";
 import { MemoryStore } from "../src/billing/store.js";
 import { EXAMPLES } from "../src/tools/examples.js";
 
@@ -192,4 +192,26 @@ test("keyed free calls report the quota and warn near the limit; my_account show
   const mcp = await (await post("/mcp", { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "my_account", arguments: {} } }, auth)).json();
   assert.equal(mcp.result.structuredContent.free_calls_left_today, 0);
   assert.equal(mcp.result.structuredContent.first_paid_call_free_available, true);
+});
+
+test("MCP agents can pass their key as the api_key argument; /stats counts keys that get used", async () => {
+  const store = new MemoryStore();
+  const billing = new Billing(store, billingConfig({ PAY_TO: "0x000000000000000000000000000000000000dEaD", FREE_DAILY_CALLS: "5" }));
+  const ctx = { store, billing, adminToken: "admin" };
+  const rpc = (params, id = 1) => handle(new Request("http://t.local/mcp", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id, method: "tools/call", params }) }), ctx).then((r) => r.json());
+  const list = await (await handle(new Request("http://t.local/mcp", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }) }), ctx)).json();
+  assert.ok(list.result.tools.find((t) => t.name === "pre_trade_check").inputSchema.properties.api_key);
+  // No session id: the key comes back in text, and the agent passes it as an argument.
+  const got = await rpc({ name: "get_api_key", arguments: {} });
+  const key = got.result.structuredContent.api_key;
+  assert.match(got.result.content[0].text, /api_key argument/);
+  const out = await rpc({ name: "position_size", arguments: { ...EXAMPLES.position_size, api_key: key } });
+  assert.equal(out.result.structuredContent._billing.mode, "free_tier");
+  // The key is stripped before the tool runs, so it never reaches the audit log.
+  const audit = await store.list(`audit:${hashKey(key).slice(0, 32)}`);
+  assert.equal(audit.length, 1);
+  assert.ok(!JSON.stringify(audit).includes(key));
+  const s = await (await handle(new Request("http://t.local/stats"), ctx)).json();
+  assert.equal(s.api_keys_used, 1);
+  assert.equal(s.api_keys_issued.by_interface.mcp, 1);
 });

@@ -37,6 +37,9 @@ const clientIp = (req) => req.headers.get("cf-connecting-ip") || (req.headers.ge
 
 // Input schema with a worked example, so an LLM can see a valid request before its first call.
 const schemaWithExample = (t) => (EXAMPLES[t.name] ? { ...t.inputSchema, examples: [EXAMPLES[t.name]] } : t.inputSchema);
+// Over MCP an LLM can't set headers or change its server URL, but it can always fill an argument.
+const API_KEY_ARG = { type: "string", description: "Optional. Your AFA API key (afa_...), from get_api_key. Pass it on every call so free calls and credits apply; without it calls use the anonymous trial." };
+const mcpSchema = (t) => { const s = schemaWithExample(t); return { ...s, properties: { ...(s.properties || {}), api_key: API_KEY_ARG } }; };
 const priceText = (t) => (t.price_usd ? `$${t.price_usd}${t.paid_only ? ", paid only" : ""}` : "free");
 
 function toolCard(t, base) {
@@ -58,7 +61,7 @@ function overview(base) {
     `- REST: POST ${base}/v1/tools/{name} with a JSON body. Schemas: GET ${base}/v1/tools, OpenAPI: ${base}/openapi.json`,
     `- MCP (streamable HTTP): ${base}/mcp`,
     "- Start here: call pre_trade_check before every order. Each tool's input schema carries a worked example (GET /v1/tools, or tools/list over MCP).",
-    "- Free trial: a few calls a day without a key. A free API key adds 25 free calls a day: over MCP, call the get_api_key tool (it attaches to your session); over REST, POST /v1/keys. URL-only MCP clients can use /mcp?key=<key>.",
+    "- Free trial: a few calls a day without a key. A free API key adds 25 free calls a day: over MCP, call the get_api_key tool, then pass the key as the api_key argument on each tool call; over REST, POST /v1/keys and send Authorization: Bearer <key>. URL-only MCP clients can also use /mcp?key=<key>.",
     "- Each API key's first advisor_memo is free. Check what a key has left with the my_account MCP tool or GET /v1/keys/me.",
     "- Pay per call with x402 (USDC on Base; minimum $0.01 per call), or prepay credits at list price: POST /v1/credits?pack=5|20|100 (packs of $20 and $100 include 10% and 20% bonus credit).",
     "- Compliance records: every paid call made with an API key is logged in a hash-chained, signed audit log (GET /v1/audit, POST /v1/audit/verify).",
@@ -149,7 +152,7 @@ async function runTool(tool, args, ctx, req, base, via, apiKey = bearer(req)) {
     audit = { seq: e.seq, hash: e.hash, input_sha256: e.input_sha256 };
   }
   const billing = { mode: auth.mode, price_usd: charged, ...(fin.credits_left_usd != null ? { credits_left_usd: fin.credits_left_usd } : {}), ...(fin.quota ? { quota: fin.quota } : {}), ...(fin.hint ? { hint: fin.hint } : {}) };
-  await ctx.store.append("usage", { ts: new Date().toISOString(), tool: tool.name, mode: auth.mode, via, src: sourceOf(req) });
+  await ctx.store.append("usage", { ts: new Date().toISOString(), tool: tool.name, mode: auth.mode, via, src: sourceOf(req), ...(apiKey && auth.mode !== "x402" ? { k: auditId(apiKey).slice(0, 12) } : {}) });
   return { status: 200, body: { ...result, _billing: billing, ...(audit ? { _audit: audit } : {}) }, headers };
 }
 
@@ -184,7 +187,9 @@ async function publicStats(ctx) {
     as_of: new Date().toISOString(),
     calls: { ...window(usage), by_tool: tally(usage, "tool"), by_mode: tally(usage, "mode"), by_interface: tally(usage, "via"), by_source: tally(usage, "src") },
     paid_calls: window(paid),
-    api_keys_issued: window(keys),
+    api_keys_issued: { ...window(keys), by_interface: tally(keys, "via") },
+    // Keys that made at least one keyed call: shows whether issued keys turn into use.
+    api_keys_used: new Set(usage.filter((u) => u.k).map((u) => u.k)).size,
     revenue_usd: Math.round(cash.reduce((a, r) => a + r.usd, 0) * 1e6) / 1e6,
     ...(ctx.memoWriter ? { advisor_memo: await memoStats(ctx.memoWriter, usage) } : {}),
     first_call: usage.reduce((m, r) => (!m || r.ts < m ? r.ts : m), null),
@@ -210,7 +215,7 @@ const MY_ACCOUNT = {
   name: "my_account",
   title: "Check this agent's key",
   description: "Free. Shows the API key's free calls left today and when they reset, prepaid credit balance, whether its one free advisor_memo is still available, and how to add credits.",
-  inputSchema: { type: "object", properties: {} },
+  inputSchema: { type: "object", properties: { api_key: API_KEY_ARG } },
 };
 
 const SESSION_TTL_NOTE = "Session keys are remembered for 48 hours.";
@@ -258,7 +263,7 @@ async function handleMcp(req, ctx, base) {
       case "tools/list":
         reply({
           tools: [
-            ...TOOLS.map((t) => ({ name: t.name, title: t.title, description: `${t.description} Price: ${priceText(t)}.`, inputSchema: schemaWithExample(t) })),
+            ...TOOLS.map((t) => ({ name: t.name, title: t.title, description: `${t.description} Price: ${priceText(t)}.`, inputSchema: mcpSchema(t) })),
             { ...GET_API_KEY },
             { ...MY_ACCOUNT },
           ],
@@ -266,12 +271,14 @@ async function handleMcp(req, ctx, base) {
         break;
       case "tools/call": {
         if (m.params?.name === GET_API_KEY.name) {
-          const r = await ctx.billing.issueKey(clientIp(req), m.params?.arguments?.label);
+          const r = await ctx.billing.issueKey(clientIp(req), m.params?.arguments?.label, "mcp");
           if (r.error) { reply({ content: [{ type: "text", text: r.error }], isError: true }); break; }
           if (sessionId) await ctx.store.set(`mcpsess:${sessionId}`, { key: r.api_key });
           const text = [
             `API key: ${r.api_key}`,
-            sessionId ? `It is attached to this MCP session, so your next calls use it automatically. ${SESSION_TTL_NOTE}` : "This client sent no MCP session id, so pass the key yourself.",
+            `Pass it as the api_key argument on every tool call (for example {"api_key": "${r.api_key}", ...}). That works in any client, even if this session is lost.`,
+            sessionId ? `It is also attached to this MCP session. ${SESSION_TTL_NOTE}` : "This client sent no MCP session id, so the api_key argument is the way to use it.",
+            "Your key's first advisor_memo (a written go / no-go memo on a trade, normally $0.10) is free.",
             `To keep it for later sessions, add ?key=${r.api_key} to the MCP URL (${base}/mcp?key=...) or send Authorization: Bearer <key>.`,
             `Free calls per day: ${r.free_calls_per_day}. After that, buy credits (POST ${base}/v1/credits?pack=5|20|100) or pay per call with x402.`,
           ].join("\n");
@@ -279,7 +286,8 @@ async function handleMcp(req, ctx, base) {
           break;
         }
         if (m.params?.name === MY_ACCOUNT.name) {
-          const k = bearer(req) || (await sessionKey());
+          const argKey = m.params?.arguments?.api_key;
+          const k = bearer(req) || (typeof argKey === "string" && argKey ? argKey : null) || (await sessionKey());
           const info = k && (await ctx.billing.keyInfo(k));
           if (!info) { reply({ content: [{ type: "text", text: "No API key on this session. Call get_api_key (free) to get one." }], isError: true }); break; }
           const body = { ...info, add_credits: `POST ${base}/v1/credits?pack=5|20|100 with Authorization: Bearer <key> and an x402 payment`, prices_usd: Object.fromEntries(TOOLS.map((t) => [t.name, t.price_usd])) };
@@ -288,8 +296,9 @@ async function handleMcp(req, ctx, base) {
         }
         const tool = TOOL_MAP[m.params?.name];
         if (!tool) { fail(-32602, `Unknown tool: ${m.params?.name}`); break; }
-        const key = bearer(req) || (await sessionKey());
-        const out = await runTool(tool, m.params?.arguments, ctx, req, base, "mcp", key);
+        const { api_key: argKey, ...toolArgs } = m.params?.arguments || {};
+        const key = bearer(req) || (typeof argKey === "string" && argKey ? argKey : null) || (await sessionKey());
+        const out = await runTool(tool, toolArgs, ctx, req, base, "mcp", key);
         if (out.status === 402) {
           reply({ content: [{ type: "text", text: upgradeText(out.body, Boolean(key), Boolean(tool.paid_only)) }, { type: "text", text: JSON.stringify(out.body, null, 2) }], isError: true });
           break;
