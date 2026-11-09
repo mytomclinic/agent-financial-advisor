@@ -23,6 +23,8 @@ function bearer(req) {
   return req.headers.get("x-api-key") || new URL(req.url).searchParams.get("key");
 }
 
+// Short client label for /stats (MCP clientInfo.name, or the User-Agent product token). Never the full header.
+const clientLabel = (s) => (String(s || "").split(/[\/(;]/)[0].trim().replace(/\s+/g, "-").replace(/[^a-z0-9_.-]/gi, "").slice(0, 32).toLowerCase() || "unknown");
 // Where a caller came from, for /stats: ?src=devto on the URL, else the referring host.
 function sourceOf(req) {
   const src = new URL(req.url).searchParams.get("src");
@@ -108,7 +110,20 @@ async function discoveryFor(tool) {
 const auditLog = (ctx) => ctx.audit || (ctx.audit = new AuditLog(ctx.store, ctx.auditSecret ?? ctx.adminToken));
 const auditId = (apiKey) => hashKey(apiKey).slice(0, 32);
 
+// Calls that did not complete (bad input, paywall, quota, paused) are logged too, so /stats shows
+// agents that tried and failed, not only the ones that succeeded.
 async function runTool(tool, args, ctx, req, base, via, apiKey = bearer(req)) {
+  const out = await runToolInner(tool, args, ctx, req, base, via, apiKey);
+  if (out.status !== 200) {
+    const reason = out.body?.type || (out.status === 402 ? "payment_required" : out.status === 429 ? "quota" : `http_${out.status}`);
+    await ctx.store.append("failed", { ts: new Date().toISOString(), tool: tool.name, reason, via, src: sourceOf(req), ...(apiKey ? { k: auditId(apiKey).slice(0, 12) } : {}) }).catch(() => {});
+    // Show the caller a request that works, so the retry succeeds.
+    if (out.status === 400 && EXAMPLES[tool.name]) out.body = { ...out.body, example_request: EXAMPLES[tool.name] };
+  }
+  return out;
+}
+
+async function runToolInner(tool, args, ctx, req, base, via, apiKey) {
   // Compute first (cheap, pure): bad input returns 400 without touching quota, credits or payment.
   let result;
   try {
@@ -177,7 +192,7 @@ async function memoStats(writer, usage) {
 async function publicStats(ctx) {
   const hit = statsCache.get(ctx.store);
   if (hit && Date.now() - hit.at < STATS_TTL_MS) return hit.body;
-  const [usage, ledger, keys] = await Promise.all([ctx.store.list("usage"), ctx.store.list("ledger"), ctx.store.list("keys")]);
+  const [usage, ledger, keys, inits, failed] = await Promise.all([ctx.store.list("usage"), ctx.store.list("ledger"), ctx.store.list("keys"), ctx.store.list("mcpinit"), ctx.store.list("failed")]);
   const since = (days) => new Date(Date.now() - days * 864e5).toISOString();
   const tally = (rows, field) => rows.reduce((o, r) => ((o[r[field] || "unknown"] = (o[r[field] || "unknown"] || 0) + 1), o), {});
   const window = (rows) => ({ total: rows.length, last_7d: rows.filter((r) => r.ts >= since(7)).length, last_24h: rows.filter((r) => r.ts >= since(1)).length });
@@ -187,7 +202,11 @@ async function publicStats(ctx) {
     as_of: new Date().toISOString(),
     calls: { ...window(usage), by_tool: tally(usage, "tool"), by_mode: tally(usage, "mode"), by_interface: tally(usage, "via"), by_source: tally(usage, "src") },
     paid_calls: window(paid),
-    api_keys_issued: { ...window(keys), by_interface: tally(keys, "via") },
+    api_keys_issued: { ...window(keys), by_interface: tally(keys, "via"), by_client: tally(keys, "client") },
+    // Which MCP clients connect (from initialize), to tell real agents from directory scanners.
+    mcp_sessions: { ...window(inits), by_client: tally(inits, "client") },
+    // Calls that returned an error (bad input, paywall, quota): agents that tried and did not get through.
+    failed_calls: { ...window(failed), by_tool: tally(failed, "tool"), by_reason: tally(failed, "reason"), by_interface: tally(failed, "via"), api_keys_tried: new Set(failed.filter((u) => u.k).map((u) => u.k)).size },
     // Keys that made at least one keyed call: shows whether issued keys turn into use.
     api_keys_used: new Set(usage.filter((u) => u.k).map((u) => u.k)).size,
     revenue_usd: Math.round(cash.reduce((a, r) => a + r.usd, 0) * 1e6) / 1e6,
@@ -255,6 +274,7 @@ async function handleMcp(req, ctx, base) {
       case "initialize":
         sessionId = sessionId || crypto.randomUUID().replace(/-/g, "");
         headers["mcp-session-id"] = sessionId;
+        await ctx.store.append("mcpinit", { ts: new Date().toISOString(), client: clientLabel(m.params?.clientInfo?.name || req.headers.get("user-agent")) }).catch(() => {}); // stats only; never block a session
         reply({ protocolVersion: m.params?.protocolVersion || "2025-06-18", capabilities: { tools: {} }, serverInfo: { name: "agent-financial-advisor", version: SERVICE.version }, instructions: overview(base) });
         break;
       case "ping":
@@ -271,7 +291,7 @@ async function handleMcp(req, ctx, base) {
         break;
       case "tools/call": {
         if (m.params?.name === GET_API_KEY.name) {
-          const r = await ctx.billing.issueKey(clientIp(req), m.params?.arguments?.label, "mcp");
+          const r = await ctx.billing.issueKey(clientIp(req), m.params?.arguments?.label, "mcp", clientLabel(req.headers.get("user-agent")));
           if (r.error) { reply({ content: [{ type: "text", text: r.error }], isError: true }); break; }
           if (sessionId) await ctx.store.set(`mcpsess:${sessionId}`, { key: r.api_key });
           const text = [
@@ -338,7 +358,7 @@ export async function handle(req, ctx) {
 
     if (req.method === "POST" && path === "/v1/keys") {
       const body = await req.json().catch(() => ({}));
-      const r = await ctx.billing.issueKey(clientIp(req), body.label);
+      const r = await ctx.billing.issueKey(clientIp(req), body.label, "rest", clientLabel(req.headers.get("user-agent")));
       return json(r, r.error ? 429 : 201);
     }
     if (req.method === "GET" && path === "/v1/keys/me") {
