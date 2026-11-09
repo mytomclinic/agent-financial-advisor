@@ -69,7 +69,9 @@ test("advisor_memo with credits returns the memo, charges $0.10 and audits the c
   const claude = fakeClaude();
   const { call, keyWithCredits, billing } = setup({ claude });
   const key = await keyWithCredits(1);
-  const r = await call("/v1/tools/advisor_memo", { body: EXAMPLES.advisor_memo, headers: { authorization: `Bearer ${key}` } });
+  // Pin the order time to regular trading hours; without it the market_hours check depends on when the test runs.
+  const body = { ...EXAMPLES.advisor_memo, trade: { ...EXAMPLES.advisor_memo.trade, order: { ...EXAMPLES.advisor_memo.trade.order, timestamp: "2026-10-20T15:00:00Z" } } };
+  const r = await call("/v1/tools/advisor_memo", { body, headers: { authorization: `Bearer ${key}` } });
   assert.equal(r.status, 200);
   const out = await r.json();
   assert.equal(out.recommendation, "proceed");

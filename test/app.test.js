@@ -215,3 +215,26 @@ test("MCP agents can pass their key as the api_key argument; /stats counts keys 
   assert.equal(s.api_keys_used, 1);
   assert.equal(s.api_keys_issued.by_interface.mcp, 1);
 });
+
+test("/stats shows which MCP clients connect and the calls that failed", async () => {
+  const store = new MemoryStore();
+  const billing = new Billing(store, billingConfig({ PAY_TO: "0x000000000000000000000000000000000000dEaD", FREE_DAILY_CALLS: "5" }));
+  const ctx = { store, billing, adminToken: "admin" };
+  const rpc = (method, params) => handle(new Request("http://t.local/mcp", { method: "POST", headers: { "content-type": "application/json", "user-agent": "DirectoryBot/2.1 (+https://example.test)" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }) }), ctx).then((r) => r.json());
+  await rpc("initialize", { clientInfo: { name: "My Trading Agent", version: "1" } });
+  await rpc("initialize", {});
+  const got = await rpc("tools/call", { name: "get_api_key", arguments: {} });
+  const key = got.result.structuredContent.api_key;
+  // A bad request is logged as a failed call and comes back with a request that works.
+  const bad = await rpc("tools/call", { name: "position_size", arguments: { api_key: key, account_equity: 1 } });
+  assert.equal(bad.result.isError, true);
+  assert.deepEqual(JSON.parse(bad.result.content[0].text).example_request, EXAMPLES.position_size);
+  const s = await (await handle(new Request("http://t.local/stats"), ctx)).json();
+  assert.deepEqual(s.mcp_sessions.by_client, { "my-trading-agent": 1, directorybot: 1 });
+  assert.equal(s.api_keys_issued.by_client.directorybot, 1);
+  assert.equal(s.failed_calls.total, 1);
+  assert.equal(s.failed_calls.by_reason.validation, 1);
+  assert.equal(s.failed_calls.api_keys_tried, 1);
+  assert.equal(s.api_keys_used, 0);
+  assert.ok(!JSON.stringify(s).includes("example.test"));
+});
