@@ -15,3 +15,16 @@ FREE_DAILY_ANON = "5"
 PAY_TO = "0x2475af09a9d4A50f7941209ee0e7b1EfA2FF73e5"  # Zach's Coinbase USDC address (Base); checksum verified 2026-10-11
 MEMO_DAILY_CAP_USD = "3"  # advisor_memo pauses itself once a day's Claude spend reaches this
 # Secrets (set with `npx wrangler secret put NAME`): ADMIN_TOKEN, CDP_API_KEY_JSON (required for "base"), ANTHROPIC_API_KEY (turns on advisor_memo)
+
+# Pull-request previews (Cloudflare Workers Builds runs `wrangler preview`): test money only,
+# with their own empty KV namespace so previews never touch production keys, credits or the ledger.
+[previews.vars]
+X402_NETWORK = "base-sepolia"
+FREE_DAILY_CALLS = "25"
+FREE_DAILY_ANON = "5"
+PAY_TO = "0x2475af09a9d4A50f7941209ee0e7b1EfA2FF73e5"
+MEMO_DAILY_CAP_USD = "0.5"
+
+[[previews.kv_namespaces]]
+binding = "AFA_KV"
+id = "fb047c41191845ee87c50e3357319a45"
