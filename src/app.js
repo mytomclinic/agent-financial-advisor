@@ -63,6 +63,7 @@ function overview(base) {
     `- REST: POST ${base}/v1/tools/{name} with a JSON body. Schemas: GET ${base}/v1/tools, OpenAPI: ${base}/openapi.json`,
     `- MCP (streamable HTTP): ${base}/mcp`,
     "- Start here: call pre_trade_check before every order. Each tool's input schema carries a worked example (GET /v1/tools, or tools/list over MCP).",
+    "- Try before you build: call any priced tool with empty input ({}) and it returns a free demo, the worked example with its full output.",
     "- Free trial: a few calls a day without a key. A free API key adds 25 free calls a day: over MCP, call the get_api_key tool, then pass the key as the api_key argument on each tool call; over REST, POST /v1/keys and send Authorization: Bearer <key>. URL-only MCP clients can also use /mcp?key=<key>.",
     "- Each API key's first advisor_memo is free. Check what a key has left with the my_account MCP tool or GET /v1/keys/me.",
     "- Pay per call with x402 (USDC on Base; minimum $0.01 per call), or prepay credits at list price: POST /v1/credits?pack=5|20|100 (packs of $20 and $100 include 10% and 20% bonus credit).",
