@@ -110,13 +110,38 @@ async function discoveryFor(tool) {
 const auditLog = (ctx) => ctx.audit || (ctx.audit = new AuditLog(ctx.store, ctx.auditSecret ?? ctx.adminToken));
 const auditId = (apiKey) => hashKey(apiKey).slice(0, 32);
 
+// Which MCP clients connect, for /stats. Directory probes open hundreds of sessions a day, so this
+// keeps one small record per day and writes only the first time a client is seen that day.
+const dayKey = (d = new Date()) => `mcpday:${d.toISOString().slice(0, 10)}`;
+async function noteMcpClient(store, client) {
+  const doc = (await store.get(dayKey())) || {};
+  if (doc[client] || Object.keys(doc).length >= 400) return;
+  doc[client] = 1;
+  await store.set(dayKey(), doc);
+}
+const PROBE_RE = /probe|check|scan|census|index|registry|directory|crawl|bot|health|survey|harvest|catalog|inspect|monitor|watch|verif|audit|collect|uptime|snapshot|radar|status|glama|smithery|mcpbeat/;
+async function mcpClientStats(store) {
+  const days = await Promise.all(Array.from({ length: 7 }, (_, i) => store.get(dayKey(new Date(Date.now() - i * 864e5)))));
+  const seen = {};
+  for (const doc of days) for (const c of Object.keys(doc || {})) seen[c] = (seen[c] || 0) + 1;
+  const names = Object.keys(seen);
+  const agents = names.filter((c) => !PROBE_RE.test(c) && c !== "unknown");
+  return {
+    clients_today: Object.keys(days[0] || {}).length,
+    clients_last_7d: names.length,
+    likely_directory_probes_last_7d: names.length - agents.length,
+    // Days seen in the last 7, for clients whose name does not look like a directory probe.
+    likely_agent_clients_days_seen: Object.fromEntries(agents.sort((a, b) => seen[b] - seen[a] || a.localeCompare(b)).slice(0, 40).map((c) => [c, seen[c]])),
+  };
+}
+
 // Calls that did not complete (bad input, paywall, quota, paused) are logged too, so /stats shows
 // agents that tried and failed, not only the ones that succeeded.
 async function runTool(tool, args, ctx, req, base, via, apiKey = bearer(req)) {
   const out = await runToolInner(tool, args, ctx, req, base, via, apiKey);
   if (out.status !== 200) {
     const reason = out.body?.type || (out.status === 402 ? "payment_required" : out.status === 429 ? "quota" : `http_${out.status}`);
-    await ctx.store.append("failed", { ts: new Date().toISOString(), tool: tool.name, reason, via, src: sourceOf(req), ...(apiKey ? { k: auditId(apiKey).slice(0, 12) } : {}) }).catch(() => {});
+    await ctx.store.append("failed", { ts: new Date().toISOString(), tool: tool.name, reason, via, src: sourceOf(req), ...(out.status === 400 ? { err: String(out.body?.error || "").slice(0, 60) } : {}), ...(apiKey ? { k: auditId(apiKey).slice(0, 12) } : {}) }).catch(() => {});
     // Show the caller a request that works, so the retry succeeds.
     if (out.status === 400 && EXAMPLES[tool.name]) out.body = { ...out.body, example_request: EXAMPLES[tool.name] };
   }
@@ -192,7 +217,7 @@ async function memoStats(writer, usage) {
 async function publicStats(ctx) {
   const hit = statsCache.get(ctx.store);
   if (hit && Date.now() - hit.at < STATS_TTL_MS) return hit.body;
-  const [usage, ledger, keys, inits, failed] = await Promise.all([ctx.store.list("usage"), ctx.store.list("ledger"), ctx.store.list("keys"), ctx.store.list("mcpinit"), ctx.store.list("failed")]);
+  const [usage, ledger, keys, mcpClients, failed] = await Promise.all([ctx.store.list("usage"), ctx.store.list("ledger"), ctx.store.list("keys"), mcpClientStats(ctx.store), ctx.store.list("failed")]);
   const since = (days) => new Date(Date.now() - days * 864e5).toISOString();
   const tally = (rows, field) => rows.reduce((o, r) => ((o[r[field] || "unknown"] = (o[r[field] || "unknown"] || 0) + 1), o), {});
   const window = (rows) => ({ total: rows.length, last_7d: rows.filter((r) => r.ts >= since(7)).length, last_24h: rows.filter((r) => r.ts >= since(1)).length });
@@ -204,9 +229,9 @@ async function publicStats(ctx) {
     paid_calls: window(paid),
     api_keys_issued: { ...window(keys), by_interface: tally(keys, "via"), by_client: tally(keys, "client") },
     // Which MCP clients connect (from initialize), to tell real agents from directory scanners.
-    mcp_sessions: { ...window(inits), by_client: tally(inits, "client") },
+    mcp_clients: mcpClients,
     // Calls that returned an error (bad input, paywall, quota): agents that tried and did not get through.
-    failed_calls: { ...window(failed), by_tool: tally(failed, "tool"), by_reason: tally(failed, "reason"), by_interface: tally(failed, "via"), api_keys_tried: new Set(failed.filter((u) => u.k).map((u) => u.k)).size },
+    failed_calls: { ...window(failed), by_tool: tally(failed, "tool"), by_reason: tally(failed, "reason"), by_error: tally(failed.filter((f) => f.err), "err"), by_interface: tally(failed, "via"), api_keys_tried: new Set(failed.filter((u) => u.k).map((u) => u.k)).size },
     // Keys that made at least one keyed call: shows whether issued keys turn into use.
     api_keys_used: new Set(usage.filter((u) => u.k).map((u) => u.k)).size,
     revenue_usd: Math.round(cash.reduce((a, r) => a + r.usd, 0) * 1e6) / 1e6,
@@ -274,7 +299,7 @@ async function handleMcp(req, ctx, base) {
       case "initialize":
         sessionId = sessionId || crypto.randomUUID().replace(/-/g, "");
         headers["mcp-session-id"] = sessionId;
-        await ctx.store.append("mcpinit", { ts: new Date().toISOString(), client: clientLabel(m.params?.clientInfo?.name || req.headers.get("user-agent")) }).catch(() => {}); // stats only; never block a session
+        await noteMcpClient(ctx.store, clientLabel(m.params?.clientInfo?.name || req.headers.get("user-agent"))).catch(() => {}); // stats only; never block a session
         reply({ protocolVersion: m.params?.protocolVersion || "2025-06-18", capabilities: { tools: {} }, serverInfo: { name: "agent-financial-advisor", version: SERVICE.version }, instructions: overview(base) });
         break;
       case "ping":

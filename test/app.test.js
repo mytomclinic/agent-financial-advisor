@@ -230,7 +230,11 @@ test("/stats shows which MCP clients connect and the calls that failed", async (
   assert.equal(bad.result.isError, true);
   assert.deepEqual(JSON.parse(bad.result.content[0].text).example_request, EXAMPLES.position_size);
   const s = await (await handle(new Request("http://t.local/stats"), ctx)).json();
-  assert.deepEqual(s.mcp_sessions.by_client, { "my-trading-agent": 1, directorybot: 1 });
+  // One record per client per day, however many sessions it opens; probes are counted, not listed.
+  await rpc("initialize", { clientInfo: { name: "My Trading Agent", version: "1" } });
+  assert.equal(Object.keys(await store.get(`mcpday:${new Date().toISOString().slice(0, 10)}`)).length, 2);
+  assert.deepEqual(s.mcp_clients, { clients_today: 2, clients_last_7d: 2, likely_directory_probes_last_7d: 1, likely_agent_clients_days_seen: { "my-trading-agent": 1 } });
+  assert.equal(s.failed_calls.by_error["Missing required field: equity"], 1);
   assert.equal(s.api_keys_issued.by_client.directorybot, 1);
   assert.equal(s.failed_calls.total, 1);
   assert.equal(s.failed_calls.by_reason.validation, 1);

@@ -9,7 +9,7 @@ class KvStore {
   async get(k) { return this.kv.get(k, "json"); }
   async set(k, v) {
     // Daily counters expire on their own; keys and balances persist.
-    const ttl = /^(anon|ipkeys|mcpsess):/.test(k) ? { expirationTtl: 60 * 60 * 48 } : {};
+    const ttl = /^(anon|ipkeys|mcpsess):/.test(k) ? { expirationTtl: 60 * 60 * 48 } : /^mcpday:/.test(k) ? { expirationTtl: 60 * 60 * 24 * 40 } : {};
     await this.kv.put(k, JSON.stringify(v), ttl);
   }
   async append(log, entry) {
