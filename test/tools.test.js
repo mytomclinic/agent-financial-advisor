@@ -130,3 +130,19 @@ test("suitability_check blocks leveraged ETFs for a conservative retiree", () =>
   assert.equal(r.result, "not_suitable");
   assert.match(r.memo.sha256, /^[0-9a-f]{64}$/);
 });
+
+test("strategy_audit uses effective trials when variants are correlated", () => {
+  let seed = 7;
+  const rnd = () => ((seed = (seed * 16807) % 2147483647) / 2147483647) - 0.5;
+  const returns = Array.from({ length: 500 }, () => 0.0006 + rnd() * 0.03);
+  const raw = run("strategy_audit", { returns, n_trials: 100 });
+  const corr = run("strategy_audit", { returns, n_trials: 100, avg_trial_correlation: 0.8 });
+  assert.equal(corr.return_stats.n_trials, 100);
+  assert.equal(corr.return_stats.effective_trials, 20.8);
+  assert.ok(corr.return_stats.deflated_sharpe_ratio > raw.return_stats.deflated_sharpe_ratio);
+  // Fully correlated variants are one trial; uncorrelated ones change nothing.
+  assert.equal(run("strategy_audit", { returns, n_trials: 100, avg_trial_correlation: 1 }).return_stats.deflated_sharpe_ratio, run("strategy_audit", { returns, n_trials: 1 }).return_stats.deflated_sharpe_ratio);
+  assert.equal(run("strategy_audit", { returns, n_trials: 100, avg_trial_correlation: 0 }).return_stats.deflated_sharpe_ratio, raw.return_stats.deflated_sharpe_ratio);
+  assert.throws(() => run("strategy_audit", { returns, n_trials: 100, avg_trial_correlation: 1.5 }), /between 0 and 1/);
+  assert.match(raw.recommendations.join(" "), /avg_trial_correlation/);
+});

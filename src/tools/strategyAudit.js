@@ -1,4 +1,4 @@
-import { DISCLAIMER } from "../lib/validate.js";
+import { DISCLAIMER, ValidationError, num } from "../lib/validate.js";
 import { mean, stdev, skewness, kurtosis, normCdf, normInv, round, sum } from "../lib/math.js";
 import { riskMetrics } from "./portfolioReview.js";
 
@@ -32,6 +32,7 @@ export const strategyAudit = {
       periods_per_year: { type: "number", default: 252 },
       n_trials: { type: "integer", description: "How many strategy/parameter variants were tested before picking this one. Default 1.", default: 1 },
       trial_sharpe_variance: { type: "number", description: "Variance of per-period Sharpe across trials, if known." },
+      avg_trial_correlation: { type: "number", description: "Average pairwise correlation (0 to 1) between the returns of the variants you tested. Near-duplicate variants (a 20-day vs. 21-day lookback) are not independent trials; with this the audit deflates by an effective trial count instead of the raw n_trials." },
       starting_equity: { type: "number", description: "For risk-of-ruin and drawdown in dollars from trades." },
     },
   },
@@ -81,7 +82,11 @@ export const strategyAudit = {
       const sk = skewness(returns);
       const ku = kurtosis(returns);
       const n = returns.length;
-      const trials = Math.max(1, input.n_trials || 1);
+      const rawTrials = Math.max(1, input.n_trials || 1);
+      // Correlated variants are not independent trials. Linear approximation: N_eff = 1 + (N - 1)(1 - avg correlation).
+      const rho = input.avg_trial_correlation == null ? null : num(input.avg_trial_correlation, "avg_trial_correlation", { min: 0 });
+      if (rho != null && rho > 1) throw new ValidationError("avg_trial_correlation must be between 0 and 1");
+      const trials = rho == null ? rawTrials : Math.max(1, 1 + (rawTrials - 1) * (1 - rho));
       const srVar = input.trial_sharpe_variance ?? (1 - sk * sr + ((ku - 1) / 4) * sr * sr) / (n - 1);
       const sr0 = expectedMaxSharpe(trials, srVar);
       const p = psr(sr, 0, n, sk, ku);
@@ -93,9 +98,10 @@ export const strategyAudit = {
         probabilistic_sharpe_ratio: round(p, 4),
         deflated_sharpe_ratio: round(dsr, 4),
         sharpe_hurdle_annualized: round(sr0 * Math.sqrt(ppy), 3),
-        n_trials: trials,
+        n_trials: rawTrials,
+        ...(rho == null ? {} : { avg_trial_correlation: rho, effective_trials: round(trials, 2), effective_trials_method: "1 + (n_trials - 1) * (1 - avg_trial_correlation); an approximation, so treat the raw-count result as the conservative bound" }),
       };
-      if (dsr < 0.95) out.red_flags.push(`Deflated Sharpe Ratio ${round(dsr, 3)} is below 0.95: after accounting for ${trials} trial(s), the Sharpe is not convincingly above what luck would produce.`);
+      if (dsr < 0.95) out.red_flags.push(`Deflated Sharpe Ratio ${round(dsr, 3)} is below 0.95: after accounting for ${round(trials, 1)} ${rho == null ? "" : "effective "}trial(s), the Sharpe is not convincingly above what luck would produce.`);
       if (n < ppy) out.red_flags.push("Less than one year of returns; regime coverage is thin.");
       if (sk < -1) out.red_flags.push(`Strong negative skew (${round(sk, 2)}): steady gains with rare large losses, typical of short-volatility exposure.`);
       if (m.max_drawdown > 0.3) out.red_flags.push(`Max drawdown ${round(m.max_drawdown * 100, 1)}% would breach most allocators' tolerance.`);
@@ -105,6 +111,7 @@ export const strategyAudit = {
     out.verdict = serious === 0 ? "robust" : serious <= 2 ? "promising_but_unproven" : "not_deployable";
     out.recommendations = [
       ...(input.n_trials ? [] : ["Report n_trials (variants tested). Without it the Deflated Sharpe assumes this was the only idea tried and will be too generous."]),
+      ...(input.n_trials > 1 && input.avg_trial_correlation == null ? ["If your variants were near-duplicates, pass avg_trial_correlation so the audit uses effective trials instead of the raw count."] : []),
       "Validate out of sample (walk-forward or a held-out period) before adding capital.",
       "Model commissions, spread and slippage explicitly; small edges disappear first.",
     ];
