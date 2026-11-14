@@ -38,7 +38,7 @@ curl -X POST localhost:8787/v1/tools/position_size -H "content-type: application
 MCP clients: point a streamable-HTTP MCP connection at `http://localhost:8787/mcp`.
 For the keyed free tier and credits, send `Authorization: Bearer <key>`, use `/mcp?key=<key>`, or have the agent call
 the free `get_api_key` tool and then pass the key as the `api_key` argument on each tool call (every tool accepts it, so it
-works in any client; the key is also bound to the MCP session). Add `?src=<name>` to any URL to attribute usage in `/stats`.
+works in any client; the key is also bound to the MCP session). Add `?src=<name>` to any URL to attribute usage in `/stats`. Calling a priced tool with an empty body (`{}`) returns a free demo: the worked example and its full output.
 
 ## Endpoints
 

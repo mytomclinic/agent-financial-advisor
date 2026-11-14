@@ -242,3 +242,24 @@ test("/stats shows which MCP clients connect and the calls that failed", async (
   assert.equal(s.api_keys_used, 0);
   assert.ok(!JSON.stringify(s).includes("example.test"));
 });
+
+test("an empty call returns a free demo instead of an error", async () => {
+  const { call, store } = setup({ payTo: PAY_TO });
+  const r = await call("/v1/tools/pre_trade_check", { method: "POST", body: {} });
+  assert.equal(r.status, 200);
+  const b = await r.json();
+  assert.equal(b.demo, true);
+  assert.deepEqual(b.example_request, EXAMPLES.pre_trade_check);
+  assert.ok(b.result.decision);
+  assert.equal(b._billing.mode, "demo");
+  // Not billed, not counted as a call, and it does not use the anonymous trial.
+  assert.equal((await store.list("usage")).length, 0);
+  assert.equal((await call("/v1/tools/position_size", { method: "POST", body: sizing })).status, 200);
+  // The paid-only memo never runs as a demo.
+  assert.notEqual((await call("/v1/tools/advisor_memo", { method: "POST", body: {} })).status, 200);
+  // A partly filled request still gets a real error, now with the required fields listed.
+  const bad = await (await call("/v1/tools/position_size", { method: "POST", body: { equity: 1000 } })).json();
+  assert.deepEqual(bad.required_fields, ["equity", "entry_price", "method"]);
+  const s = await (await call("/stats")).json();
+  assert.equal(s.demo_replies.by_tool.pre_trade_check, 1);
+});
