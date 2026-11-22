@@ -136,6 +136,23 @@ async function mcpClientStats(store) {
   };
 }
 
+// Names of the fields a caller sent (one level into objects), never the values: enough to see which
+// names agents expect, so common ones can be accepted.
+function fieldNames(args) {
+  if (!args || typeof args !== "object" || Array.isArray(args)) return [];
+  const clean = (k) => String(k).replace(/[^a-z0-9_.-]/gi, "").slice(0, 24);
+  const out = [];
+  for (const [k, v] of Object.entries(args)) {
+    if (k === "api_key") continue;
+    if (v && typeof v === "object" && !Array.isArray(v)) {
+      const subs = Object.keys(v).slice(0, 6);
+      if (subs.length) for (const s of subs) out.push(`${clean(k)}.${clean(s)}`);
+      else out.push(clean(k));
+    } else out.push(clean(k));
+  }
+  return out.slice(0, 16).sort();
+}
+
 // Calls that did not complete (bad input, paywall, quota, paused) are logged too, so /stats shows
 // agents that tried and failed, not only the ones that succeeded.
 async function runTool(tool, args, ctx, req, base, via, apiKey = bearer(req)) {
@@ -157,7 +174,7 @@ async function runTool(tool, args, ctx, req, base, via, apiKey = bearer(req)) {
   const out = await runToolInner(tool, args, ctx, req, base, via, apiKey);
   if (out.status !== 200) {
     const reason = out.body?.type || (out.status === 402 ? "payment_required" : out.status === 429 ? "quota" : `http_${out.status}`);
-    await ctx.store.append("failed", { ts: new Date().toISOString(), tool: tool.name, reason, via, src: sourceOf(req), ...(out.status === 400 ? { err: String(out.body?.error || "").slice(0, 60) } : {}), ...(apiKey ? { k: auditId(apiKey).slice(0, 12) } : {}) }).catch(() => {});
+    await ctx.store.append("failed", { ts: new Date().toISOString(), tool: tool.name, reason, via, src: sourceOf(req), ...(out.status === 400 ? { err: String(out.body?.error || "").slice(0, 60), f: fieldNames(args) } : {}), ...(apiKey ? { k: auditId(apiKey).slice(0, 12) } : {}) }).catch(() => {});
     // Show the caller a request that works, so the retry succeeds.
     if (out.status === 400 && EXAMPLES[tool.name]) out.body = { ...out.body, ...(tool.inputSchema?.required ? { required_fields: tool.inputSchema.required } : {}), example_request: EXAMPLES[tool.name] };
   }
@@ -247,11 +264,12 @@ async function publicStats(ctx) {
     // Which MCP clients connect (from initialize), to tell real agents from directory scanners.
     mcp_clients: mcpClients,
     // Calls that returned an error (bad input, paywall, quota): agents that tried and did not get through.
-    failed_calls: { ...window(failed), by_tool: tally(failed, "tool"), by_reason: tally(failed, "reason"), by_error: tally(failed.filter((f) => f.err), "err"), by_interface: tally(failed, "via"), api_keys_tried: new Set(failed.filter((u) => u.k).map((u) => u.k)).size },
+    failed_calls: { ...window(failed), by_tool: tally(failed, "tool"), by_reason: tally(failed, "reason"), by_error: tally(failed.filter((f) => f.err), "err"), sent_fields_last_7d: tally(failed.filter((f) => f.f && Date.now() - Date.parse(f.ts) < 7 * 864e5).slice(-40).map((f) => ({ s: `${f.tool}: ${f.f.join(",") || "(none)"}`.slice(0, 200) })), "s"), by_interface: tally(failed, "via"), api_keys_tried: new Set(failed.filter((u) => u.k).map((u) => u.k)).size },
     // Empty calls answered with the free worked example (first-time agents and directory tests).
     demo_replies: { ...window(demos), by_tool: tally(demos, "tool") },
     // Keys that made at least one keyed call: shows whether issued keys turn into use.
     api_keys_used: new Set(usage.filter((u) => u.k).map((u) => u.k)).size,
+    api_keys_used_on_priced_tools: new Set(usage.filter((u) => u.k && u.mode !== "free_tool").map((u) => u.k)).size,
     revenue_usd: Math.round(cash.reduce((a, r) => a + r.usd, 0) * 1e6) / 1e6,
     ...(ctx.memoWriter ? { advisor_memo: await memoStats(ctx.memoWriter, usage) } : {}),
     first_call: usage.reduce((m, r) => (!m || r.ts < m ? r.ts : m), null),
