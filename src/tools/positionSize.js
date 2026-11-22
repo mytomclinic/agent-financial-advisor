@@ -1,4 +1,4 @@
-import { need, num, oneOf, DISCLAIMER } from "../lib/validate.js";
+import { need, num, oneOf, ValidationError, DISCLAIMER } from "../lib/validate.js";
 import { round } from "../lib/math.js";
 
 export const positionSize = {
@@ -16,7 +16,7 @@ export const positionSize = {
       entry_price: { type: "number" },
       method: { enum: ["fixed_fractional", "volatility", "kelly"] },
       side: { enum: ["long", "short"], default: "long" },
-      stop_price: { type: "number", description: "fixed_fractional: protective stop." },
+      stop_price: { type: "number", description: "Required when method is fixed_fractional: the protective stop price." },
       risk_pct: { type: "number", description: "fixed_fractional: fraction of equity to risk, default 0.01." },
       atr: { type: "number", description: "volatility: average true range in price units." },
       atr_multiple: { type: "number", description: "volatility: stop distance in ATRs, default 2." },
@@ -42,7 +42,12 @@ export const positionSize = {
     let riskPerShare = null;
 
     if (method === "fixed_fractional") {
-      const stop = num(need(input, "stop_price"), "stop_price", { positive: true });
+      // Agents often name the stop the way pre_trade_check does (stop_loss_price) or just "stop".
+      const stopIn = input.stop_price ?? input.stop_loss_price ?? input.stop_loss ?? input.stop;
+      if (stopIn === undefined || stopIn === null || stopIn === "") {
+        throw new ValidationError("Missing required field: stop_price (method fixed_fractional sizes to a stop; without one use method volatility with atr or annual_vol, or kelly)");
+      }
+      const stop = num(stopIn, "stop_price", { positive: true });
       const riskPct = input.risk_pct ?? 0.01;
       riskPerShare = Math.abs(entry - stop);
       if (riskPerShare === 0) throw new Error("stop_price equals entry_price");

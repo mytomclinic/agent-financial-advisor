@@ -238,6 +238,9 @@ test("/stats shows which MCP clients connect and the calls that failed", async (
   assert.equal(s.api_keys_issued.by_client.directorybot, 1);
   assert.equal(s.failed_calls.total, 1);
   assert.equal(s.failed_calls.by_reason.validation, 1);
+  // Field names sent (never values, never the key) show which names agents expect.
+  assert.deepEqual(s.failed_calls.sent_fields_last_7d, { "position_size: account_equity": 1 });
+  assert.equal(s.api_keys_used_on_priced_tools, 0);
   assert.equal(s.failed_calls.api_keys_tried, 1);
   assert.equal(s.api_keys_used, 0);
   assert.ok(!JSON.stringify(s).includes("example.test"));

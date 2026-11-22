@@ -146,3 +146,29 @@ test("strategy_audit uses effective trials when variants are correlated", () => 
   assert.throws(() => run("strategy_audit", { returns, n_trials: 100, avg_trial_correlation: 1.5 }), /between 0 and 1/);
   assert.match(raw.recommendations.join(" "), /avg_trial_correlation/);
 });
+
+test("first-call fixes: stop aliases, assumed cash account, no crash without a price", () => {
+  const base = { equity: 50000, entry_price: 100, method: "fixed_fractional", risk_pct: 0.01 };
+  const want = run("position_size", { ...base, stop_price: 95 }).quantity;
+  for (const k of ["stop_loss_price", "stop_loss", "stop"]) assert.equal(run("position_size", { ...base, [k]: 95 }).quantity, want);
+  assert.throws(() => run("position_size", base), /stop_price \(method fixed_fractional/);
+
+  const order = { symbol: "AAPL", side: "buy", quantity: 10, limit_price: 100, stop_loss_price: 97, timestamp: MON_NOON_ET };
+  const assumed = run("pre_trade_check", { account: { equity: 50000, cash: 50000 }, order });
+  assert.equal(assumed.checks.find((c) => c.id === "account_type").status, "warn");
+  assert.equal(assumed.decision, "approve_with_warnings");
+  const ira = run("pre_trade_check", { account: { type: "Roth IRA", equity: 50000, cash: 50000 }, order });
+  assert.ok(!ira.checks.some((c) => c.id === "account_type"));
+  assert.equal(ira.decision, "approve");
+  const short = run("pre_trade_check", { account: { type: "IRA", equity: 50000, cash: 50000 }, order: { ...order, side: "sell_short", stop_loss_price: 103 } });
+  assert.ok(short.checks.some((c) => c.id === "short_sale_account" && c.status === "fail"));
+  assert.throws(() => run("pre_trade_check", { account: { type: "crypto", equity: 1 }, order }), /account.type must be one of/);
+
+  // No price anywhere used to throw "Cannot access 'suggestedQty' before initialization".
+  const noPrice = run("pre_trade_check", { account: { type: "cash", equity: 50000 }, order: { symbol: "AAPL", side: "buy", quantity: 10 } });
+  assert.equal(noPrice.decision, "reject");
+  assert.equal(noPrice.checks[0].id, "price_known");
+
+  const opt = run("options_risk_check", { account: { equity: 50000, cash: 50000 }, underlying: { symbol: "AAPL", price: 100 }, legs: [{ type: "call", side: "long", strike: 105, expiry: "2026-12-18", quantity: 1, premium: 2 }], as_of: "2026-10-12" });
+  assert.ok(opt.notes.some((n) => n.includes("cash account was assumed")));
+});

@@ -1,6 +1,6 @@
 import { RULES, RULES_VERSION, defaultDayTradeRegime } from "../lib/regs.js";
 import { sessionAt, daysBetween, toIsoDate } from "../lib/calendar.js";
-import { need, num, oneOf, DISCLAIMER } from "../lib/validate.js";
+import { need, num, oneOf, DISCLAIMER, accountType, ASSUMED_CASH_NOTE } from "../lib/validate.js";
 import { round } from "../lib/math.js";
 
 const DEFAULT_POLICY = {
@@ -88,9 +88,11 @@ export const preTradeCheck = {
     const market = input.market || {};
     const policy = { ...DEFAULT_POLICY, ...(input.policy || {}) };
     const checks = [];
+    let suggestedQty = null;
     const add = (id, status, message, rule) => checks.push({ id, status, message, ...(rule ? { rule } : {}) });
 
-    const type = oneOf(account.type, "account.type", ["cash", "margin"]);
+    const { type, assumed: typeAssumed } = accountType(account);
+    if (typeAssumed) add("account_type", "warn", ASSUMED_CASH_NOTE);
     const equity = num(account.equity, "account.equity", { positive: true });
     const symbol = String(need(order, "symbol")).toUpperCase();
     const side = oneOf(order.side, "order.side", ["buy", "sell", "sell_short", "buy_to_cover"]);
@@ -158,7 +160,6 @@ export const preTradeCheck = {
     // Concentration
     const posValueAfter = Math.abs(newQty) * price;
     const posPct = posValueAfter / equity;
-    let suggestedQty = null;
     if (opening && posPct > policy.max_position_pct) {
       const maxQty = Math.max(0, Math.floor((policy.max_position_pct * equity) / price - Math.abs(heldQty)));
       suggestedQty = maxQty;

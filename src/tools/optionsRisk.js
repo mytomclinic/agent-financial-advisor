@@ -1,6 +1,6 @@
 import { RULES, RULES_VERSION } from "../lib/regs.js";
 import { daysBetween, isTradingDay, addDays, newYorkParts } from "../lib/calendar.js";
-import { need, num, arr, oneOf, ValidationError, DISCLAIMER } from "../lib/validate.js";
+import { need, num, arr, oneOf, ValidationError, DISCLAIMER, accountType, ASSUMED_CASH_NOTE } from "../lib/validate.js";
 import { round } from "../lib/math.js";
 
 const DEFAULT_POLICY = { pin_band_pct: 0.01, max_requirement_pct_of_equity: 0.5, max_delta_dollars_pct_of_equity: 1, assignment_dte: 5, low_extrinsic: 0.05 };
@@ -75,7 +75,7 @@ export const optionsRiskCheck = {
   },
   handler(input) {
     const account = need(input, "account");
-    const acctType = oneOf(account.type, "account.type", ["cash", "margin"]);
+    const { type: acctType, assumed: typeAssumed } = accountType(account);
     const equity = num(need(input, "account.equity"), "account.equity", { positive: true });
     const symbol = String(need(input, "underlying.symbol")).toUpperCase();
     const S = num(need(input, "underlying.price"), "underlying.price", { positive: true });
@@ -104,6 +104,7 @@ export const optionsRiskCheck = {
 
     const checks = [];
     const notes = [];
+    if (typeAssumed) notes.push(ASSUMED_CASH_NOTE);
     const add = (check, status, detail, source) => checks.push({ check, status, detail, ...(source ? { source } : {}) });
     if (legs.some((l) => l.premium == null)) notes.push("Some legs have no premium, so option values count as $0 in margin and max-loss figures.");
 

@@ -30,6 +30,23 @@ export function oneOf(v, name, options) {
   return v;
 }
 
+// Account types agents send in practice, mapped to the two the rules distinguish. Retirement accounts
+// trade under cash-account rules. A missing type is assumed to be cash, the stricter case, and the
+// caller is told so.
+const ACCOUNT_TYPES = {
+  cash: "cash", cash_account: "cash", ira: "cash", roth: "cash", roth_ira: "cash", traditional_ira: "cash", retirement: "cash", "401k": "cash",
+  margin: "margin", margin_account: "margin", reg_t: "margin", regt: "margin", portfolio_margin: "margin",
+};
+export const ASSUMED_CASH_NOTE = "account.type was not given, so a cash account was assumed (the stricter case). Send account.type = \"margin\" for a margin account.";
+
+export function accountType(account) {
+  const raw = account?.type ?? account?.account_type;
+  if (raw === undefined || raw === null || raw === "") return { type: "cash", assumed: true };
+  const type = ACCOUNT_TYPES[String(raw).trim().toLowerCase().replace(/[\s-]+/g, "_")];
+  if (!type) throw new ValidationError("account.type must be one of: cash, margin");
+  return { type, assumed: false };
+}
+
 export const DISCLAIMER =
   "Automated rule-based analysis for software agents. Not personalized investment, tax or legal advice; " +
   "verify broker-specific rules and consult a licensed professional for decisions affecting real people.";
